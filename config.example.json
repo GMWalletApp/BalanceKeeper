@@ -6,7 +6,7 @@
   "scannerToken": "${CHAINSCANNER_CONSUMER_TOKEN}",
   "broadcastSecret": "${BROADCASTER_NOTIFICATION_SECRET}",
   "networks": {
-    "bitcoin": { "rpc": "https://blockstream.info/api" },
+    "bitcoin": { "rpc": "${BITCOIN_ESPLORA_URL}" },
     "base": { "rpc": "${BASE_RPC_URL}", "confirmations": 12 },
     "ethereum": { "rpc": "${ETHEREUM_RPC_URL}", "confirmations": 12 }
   }

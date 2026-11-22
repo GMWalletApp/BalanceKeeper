@@ -81,7 +81,7 @@ func (s *Service) nextProbe(ctx context.Context) (bool, error) {
 	if e != nil {
 		return false, e
 	}
-	yes, e := s.probeToken(ctx, n, a, t, height, obs)
+	yes, e := readNodes(ctx, s, n, func(ctx context.Context) (bool, error) { return s.probeToken(ctx, n, a, t, height, obs) })
 	if e != nil {
 		_, dbErr := s.db.ExecContext(ctx, "UPDATE evm_probes SET due=?,attempts=attempts+1 WHERE id=? AND watch=?", backoff(attempt), id, wid)
 		return true, errors.Join(e, dbErr)

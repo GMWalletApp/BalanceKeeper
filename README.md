@@ -19,13 +19,15 @@ go build -o balancekeeper .
 cp config.example.json config.json
 ```
 
-示例启用 Bitcoin、Base 和 Ethereum。Bitcoin 使用 Blockstream 的 Esplora 地址索引。将这两个网络的 RPC 地址分别设为 `BASE_RPC_URL`、`ETHEREUM_RPC_URL`。将 ChainScanner 的服务地址和专属消费者令牌设为 `CHAINSCANNER_URL`、`CHAINSCANNER_CONSUMER_TOKEN`。设置供业务方调用的 `BK_TOKEN`，以及两端共享的独立签名密钥 `BROADCASTER_NOTIFICATION_SECRET`。三个凭证分别配置，每个至少 24 字节。只启用某个网络时，从配置里移除其余网络。
+示例启用 Bitcoin、Base 和 Ethereum。分别将自己的 Esplora 索引和两个 EVM 主节点地址填入 `BITCOIN_ESPLORA_URL`、`BASE_RPC_URL`、`ETHEREUM_RPC_URL`。将 ChainScanner 的服务地址和专属消费者令牌设为 `CHAINSCANNER_URL`、`CHAINSCANNER_CONSUMER_TOKEN`。设置供业务方调用的 `BK_TOKEN`，以及两端共享的独立签名密钥 `BROADCASTER_NOTIFICATION_SECRET`。三个凭证分别配置，每个至少 24 字节。只启用某个网络时，从配置里移除其余网络。
 
 ```sh
 ./balancekeeper -config config.json
 ```
 
-服务启动时核对每个已配置 RPC 的网络身份。默认监听 `127.0.0.1:9082`，把 SQLite 文件和 WAL 放在同一持久盘。每个数据库运行一个实例，每个实例独占一个 ChainScanner 消费者令牌。Broadcaster 的 `broadcastNotifications.url` 填能访问此服务的 HTTPS 地址，路径为 `/v1/notifications/broadcasts`。仅用 ChainScanner 时可省略 `broadcastSecret`。[配置示例](config.example.json) · [Broadcaster 配置](https://github.com/GMWalletApp/Broadcaster/blob/main/docs/api.zh-CN.md#balancekeeper)
+每条链优先读取自己配置的 `networks.<network>.rpc`。省略 `backup` 时使用该链内置的备用节点，也可以用 `backup.rpc` 覆盖。切换时重新核对网络身份，分页查询会从第一页重读。[18 个主网的完整配置](config.mainnets.example.json) · [主备节点与接口要求](docs/nodes.zh-CN.md)
+
+默认监听 `127.0.0.1:9082`，把 SQLite 文件和 WAL 放在同一持久盘。每个数据库运行一个实例，每个实例独占一个 ChainScanner 消费者令牌。Broadcaster 的 `broadcastNotifications.url` 填能访问此服务的 HTTPS 地址，路径为 `/v1/notifications/broadcasts`。仅用 ChainScanner 时可省略 `broadcastSecret`。[配置示例](config.example.json) · [Broadcaster 配置](https://github.com/GMWalletApp/Broadcaster/blob/main/docs/api.zh-CN.md#balancekeeper)
 
 各网络可设 `bearer` 作为 RPC 的 Bearer 令牌。`confirmations` 是 Bitcoin 和 EVM 余额读取距最新块的深度，默认为 0。Solana 使用 finalized，`cluster` 可填 Broadcaster 自定义的主网配置键。Sui 的 `rpc` 填 gRPC 服务根地址，Aptos、TRON 和 TON 填 HTTP 服务根地址。TON 需能访问 v2 余额接口和 v3 索引；索引位于独立地址时配置 `index` 和可选 `indexBearer`。运行 `go test -race ./...` 可使用临时数据库和本地节点模拟服务验证。
 

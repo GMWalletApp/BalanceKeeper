@@ -102,7 +102,15 @@ func (s *Service) nextGap(ctx context.Context) (bool, error) {
 	if e != nil {
 		return false, e
 	}
-	tokens, next, e := s.discoverGap(ctx, n, a, lo, hi)
+	type page struct {
+		tokens []string
+		next   int64
+	}
+	result, e := readNodes(ctx, s, n, func(ctx context.Context) (page, error) {
+		tokens, next, err := s.discoverGap(ctx, n, a, lo, hi)
+		return page{tokens, next}, err
+	})
+	tokens, next := result.tokens, result.next
 	if e != nil {
 		_, de := s.db.ExecContext(ctx, "UPDATE gaps SET attempts=attempts+1,due=?,last_error=? WHERE watch=?", backoff(attempts), e.Error(), id)
 		return true, errors.Join(e, de)

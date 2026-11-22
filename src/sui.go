@@ -19,7 +19,7 @@ import (
 )
 
 func (s *Service) suiConn(ctx context.Context) (context.Context, *grpc.ClientConn, func(), error) {
-	cfg := s.cfg.Networks["sui"]
+	cfg := s.network(ctx, "sui")
 	u, e := url.Parse(cfg.RPC)
 	if e != nil || u.Hostname() == "" || u.Path != "" && u.Path != "/" {
 		return ctx, nil, nil, invalidEvidence

@@ -78,7 +78,7 @@ func (s *Service) ownerBalances(ctx context.Context, n, a string, height int64) 
 			seen[string(req.PageToken)] = true
 		}
 	default:
-		cfg := s.cfg.Networks[n]
+		cfg := s.network(ctx, n)
 		id, e := s.rpcAt(ctx, cfg.InventoryRPC, cfg.InventoryBearer, "eth_chainId")
 		num, ne := number(id, 16)
 		if e != nil || ne != nil || num != chainIDs[n] {
@@ -136,7 +136,16 @@ func (s *Service) nextInventory(ctx context.Context, n string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	observed, err := s.ownerBalances(ctx, n, a, max(0, start-1))
+	read := func(ctx context.Context) (map[string]string, error) {
+		return s.ownerBalances(ctx, n, a, max(0, start-1))
+	}
+	var observed map[string]string
+	if cfg := s.cfg.Networks[n]; chainIDs[n] != 0 && (cfg.Backup == nil || cfg.Backup.InventoryRPC == "") {
+		// Owner enumeration requires an index with alchemy_getTokenBalances.
+		observed, err = read(ctx)
+	} else {
+		observed, err = readNodes(ctx, s, n, read)
+	}
 	if err != nil {
 		_, de := s.db.ExecContext(ctx, "UPDATE watches SET discovery_due=? WHERE id=? AND discovery_due=?", now.Add(time.Minute).UnixMilli(), wid, lease)
 		return true, errors.Join(err, de)

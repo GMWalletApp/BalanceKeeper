@@ -233,7 +233,7 @@ func number(v gjson.Result, base int) (int64, error) {
 	return x.Int64(), nil
 }
 func (s *Service) rpc(ctx context.Context, n, method string, params ...any) (gjson.Result, error) {
-	cfg := s.cfg.Networks[n]
+	cfg := s.network(ctx, n)
 	return s.rpcAt(ctx, cfg.RPC, cfg.Bearer, method, params...)
 }
 func (s *Service) rpcAt(ctx context.Context, endpoint, bearer, method string, params ...any) (gjson.Result, error) {
@@ -250,12 +250,16 @@ func (s *Service) rpcAt(ctx context.Context, endpoint, bearer, method string, pa
 	return r.Get("result"), nil
 }
 func (s *Service) rest(ctx context.Context, n, path string, body any) (gjson.Result, error) {
-	cfg := s.cfg.Networks[n]
+	cfg := s.network(ctx, n)
 	method := "GET"
 	if body != nil {
 		method = "POST"
 	}
-	r, _, e := s.request(ctx, method, strings.TrimRight(cfg.RPC, "/")+path, cfg.Bearer, body)
+	header := "X-API-Key"
+	if n == "tron" {
+		header = "TRON-PRO-API-KEY"
+	}
+	r, _, e := s.requestWithKey(ctx, method, nodeURL(cfg.RPC, path), cfg.Bearer, header, cfg.APIKey, body)
 	return r, e
 }
 func evmHeight(raw int64) string { return fmt.Sprintf("0x%x", raw) }
@@ -269,6 +273,9 @@ func (s *Service) evmBlock(ctx context.Context, n string, h int64) (point, error
 	return point{h, r.Get("hash").String(), ptr(iso(time.Unix(ts, 0)))}, nil
 }
 func (s *Service) head(ctx context.Context, n string) (point, error) {
+	if node, ok := ctx.Value(nodeContextKey{}).(*selectedNode); ok && node.name == n && node.head != nil {
+		return *node.head, nil
+	}
 	var r gjson.Result
 	var e error
 	var h int64

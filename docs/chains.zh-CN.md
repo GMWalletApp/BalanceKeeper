@@ -8,7 +8,7 @@
 
 ## 同步当前地址集合
 
-BalanceKeeper 使用独占的 ChainScanner 消费者令牌。服务需要配置 ChainScanner 的 HTTP 地址、消费者令牌，以及各网络独立的余额 RPC。以下调用发往 **ChainScanner**；业务方只调用 BalanceKeeper。
+BalanceKeeper 使用独占的 ChainScanner 消费者令牌。服务需要配置 ChainScanner 的 HTTP 地址、消费者令牌，以及各网络独立的主节点和备用节点。主备地址、认证和可选索引见[主备节点配置](nodes.zh-CN.md)。以下调用发往 **ChainScanner**；业务方只调用 BalanceKeeper。
 
 ```http
 PUT /v1/subscriptions HTTP/1.1

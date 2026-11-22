@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+	"golang.org/x/time/rate"
 	_ "modernc.org/sqlite"
 )
 
@@ -30,14 +31,17 @@ var schema string
 
 type M = map[string]any
 type Network struct {
-	RPC             string `json:"rpc"`
-	Bearer          string `json:"bearer,omitempty"`
-	Confirmations   int64  `json:"confirmations,omitempty"`
-	Index           string `json:"index,omitempty"`
-	IndexBearer     string `json:"indexBearer,omitempty"`
-	InventoryRPC    string `json:"tokenInventoryRPC,omitempty"`
-	InventoryBearer string `json:"tokenInventoryBearer,omitempty"`
-	Cluster         string `json:"cluster,omitempty"`
+	Backup          *NodeEndpoints `json:"backup,omitempty"`
+	APIKey          string         `json:"apiKey,omitempty"`
+	IndexAPIKey     string         `json:"indexApiKey,omitempty"`
+	RPC             string         `json:"rpc"`
+	Bearer          string         `json:"bearer,omitempty"`
+	Confirmations   int64          `json:"confirmations,omitempty"`
+	Index           string         `json:"index,omitempty"`
+	IndexBearer     string         `json:"indexBearer,omitempty"`
+	InventoryRPC    string         `json:"tokenInventoryRPC,omitempty"`
+	InventoryBearer string         `json:"tokenInventoryBearer,omitempty"`
+	Cluster         string         `json:"cluster,omitempty"`
 }
 type Config struct {
 	Listen          string             `json:"listen"`
@@ -112,6 +116,16 @@ func wait(ctx context.Context, d time.Duration) bool {
 	}
 }
 func (s *Service) request(ctx context.Context, method, endpoint, bearer string, body any) (gjson.Result, int, error) {
+	return s.requestWithKey(ctx, method, endpoint, bearer, "", "", body)
+}
+
+// TON Center shares its anonymous one-request-per-second quota across v2 and v3.
+var anonymousTON = rate.NewLimiter(rate.Every(1100*time.Millisecond), 1)
+
+// VibeStation also limits anonymous bursts across Solana JSON-RPC methods.
+var anonymousSolana = rate.NewLimiter(rate.Every(1200*time.Millisecond), 1)
+
+func (s *Service) requestWithKey(ctx context.Context, method, endpoint, bearer, header, key string, body any) (gjson.Result, int, error) {
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewBufferString(compact(body))
@@ -119,6 +133,23 @@ func (s *Service) request(ctx context.Context, method, endpoint, bearer string, 
 	req, e := http.NewRequestWithContext(ctx, method, endpoint, r)
 	if e != nil {
 		return gjson.Result{}, 0, errors.New("invalid service URL")
+	}
+	if key == "" && bearer == "" && req.URL.Query().Get("api_key") == "" {
+		var limit *rate.Limiter
+		switch strings.ToLower(req.URL.Hostname()) {
+		case "toncenter.com":
+			limit = anonymousTON
+		case "public.rpc.solanavibestation.com":
+			limit = anonymousSolana
+		}
+		if limit != nil {
+			if err := limit.Wait(ctx); err != nil {
+				return gjson.Result{}, 0, err
+			}
+		}
+	}
+	if key != "" {
+		req.Header.Set(header, key)
 	}
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
@@ -144,6 +175,7 @@ func (s *Service) request(ctx context.Context, method, endpoint, bearer string, 
 	}
 	return gjson.ParseBytes(b), resp.StatusCode, nil
 }
+
 // Run starts the BalanceKeeper service using the command-line configuration.
 func Run() error {
 	path := flag.String("config", "config.json", "configuration path")
@@ -170,21 +202,11 @@ func Run() error {
 		return errors.New("use a dedicated broadcast secret of at least 24 bytes")
 	}
 	for name, n := range c.Networks {
-		if n.InventoryRPC != "" {
-			n.InventoryRPC = os.ExpandEnv(n.InventoryRPC)
-			if chainIDs[name] == 0 || !validURL(n.InventoryRPC) {
-				return fmt.Errorf("invalid tokenInventoryRPC for %s", name)
-			}
+		node, err := configureNode(name, n)
+		if err != nil {
+			return err
 		}
-		n.InventoryBearer = os.ExpandEnv(n.InventoryBearer)
-		n.RPC = os.ExpandEnv(n.RPC)
-		n.Index = os.ExpandEnv(n.Index)
-		n.IndexBearer = os.ExpandEnv(n.IndexBearer)
-		if !supported(name) || !validURL(n.RPC) || n.Confirmations < 0 || n.Index != "" && !validURL(n.Index) {
-			return fmt.Errorf("invalid network configuration: %s", name)
-		}
-		n.Bearer = os.ExpandEnv(n.Bearer)
-		c.Networks[name] = n
+		c.Networks[name] = node
 	}
 	c.Scanner = strings.TrimRight(c.Scanner, "/")
 	if c.Listen == "" {
@@ -198,7 +220,7 @@ func Run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	for network := range c.Networks {
-		if _, e := s.head(ctx, network); e != nil {
+		if _, e := readNodes(ctx, s, network, func(ctx context.Context) (point, error) { return s.head(ctx, network) }); e != nil {
 			return fmt.Errorf("verify RPC for %s: %w", network, e)
 		}
 	}
@@ -221,5 +243,5 @@ func Run() error {
 }
 func validURL(raw string) bool {
 	u, e := url.Parse(raw)
-	return e == nil && u.Hostname() != "" && (u.Scheme == "http" || u.Scheme == "https") && u.User == nil
+	return e == nil && u.Hostname() != "" && (u.Scheme == "http" || u.Scheme == "https") && u.User == nil && u.Fragment == ""
 }

@@ -176,14 +176,27 @@ type evidence struct {
 }
 
 func (s *Service) tonIndex(ctx context.Context, path string) (gjson.Result, error) {
-	c := s.cfg.Networks["ton"]
+	c := s.network(ctx, "ton")
+	key := c.IndexAPIKey
 	bearer := c.IndexBearer
 	base := c.Index
 	if base == "" {
 		base = c.RPC
 		bearer = c.Bearer
+		key = c.APIKey
 	}
-	v, _, e := s.request(ctx, "GET", strings.TrimRight(base, "/")+"/api/v3/"+path, bearer, nil)
+	// A standalone v3 index can point to a different ledger than the v2 RPC.
+	if route, ok := ctx.Value(nodeContextKey{}).(*selectedNode); ok && c.Index != "" && !route.indexVerified {
+		info, _, err := s.requestWithKey(ctx, "GET", nodeURL(base, "/api/v3/masterchainInfo"), bearer, "X-API-Key", key, nil)
+		if err != nil {
+			return gjson.Result{}, err
+		}
+		if info.Get("last.global_id").Raw != "-239" || info.Get("last.workchain").Raw != "-1" {
+			return gjson.Result{}, invalidEvidence
+		}
+		route.indexVerified = true
+	}
+	v, _, e := s.requestWithKey(ctx, "GET", nodeURL(base, "/api/v3/"+path), bearer, "X-API-Key", key, nil)
 	return v, e
 }
 
@@ -209,6 +222,55 @@ func (s *Service) fullTransaction(ctx context.Context, n, hash string) (gjson.Re
 	default:
 		return gjson.Result{}, invalidEvidence
 	}
+}
+
+type transactionAssets struct {
+	evidence
+	candidates candidates
+	contracts  map[string]bool
+}
+
+// Keep a verified receipt usable when neither provider can supply a trace.
+func (s *Service) transactionAssets(ctx context.Context, n, source string, p gjson.Result) (transactionAssets, error) {
+	var partial *transactionAssets
+	result, err := readNodes(ctx, s, n, func(ctx context.Context) (transactionAssets, error) {
+		ev, e := s.evidence(ctx, n, source, p)
+		v := transactionAssets{evidence: ev, contracts: map[string]bool{}}
+		if e != nil {
+			return v, e
+		}
+		switch {
+		case chainIDs[n] != 0:
+			v.candidates = parseEVM(n, ev, v.contracts)
+			if s.cfg.Networks[n].Backup != nil && ev.data.Get("receipt.status").Str != "0x0" && !ev.trace.IsObject() {
+				if partial == nil || ev.traceRetry != nil {
+					partial = &v
+				}
+				return v, errors.New("trace unavailable on selected node")
+			}
+		case n == "bitcoin":
+			changes, e := bitcoinChanges(ev.data)
+			if e != nil {
+				return v, e
+			}
+			v.candidates = candidates{}
+			for addr := range changes {
+				v.candidates.add(n, addr, "native")
+			}
+		case n == "solana":
+			v.candidates = parseSolana(n, ev.data)
+		default:
+			v.candidates = parseOther(n, ev.data)
+			if n == "aptos" {
+				e = s.aptosOwners(ctx, ev, v.candidates)
+			}
+		}
+		return v, e
+	})
+	if err != nil && partial != nil && ctx.Err() == nil {
+		return *partial, nil
+	}
+	return result, err
 }
 
 func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result) (evidence, error) {
@@ -399,6 +461,9 @@ func (s *Service) aptosOwners(ctx context.Context, ev evidence, c candidates) er
 	return nil
 }
 func (s *Service) jettons(ctx context.Context, a string) ([]string, error) {
+	return readNodes(ctx, s, "ton", func(ctx context.Context) ([]string, error) { return s.jettonsAt(ctx, a) })
+}
+func (s *Service) jettonsAt(ctx context.Context, a string) ([]string, error) {
 	out := []string{}
 	for offset := 0; ; offset += 100 {
 		v, e := s.tonIndex(ctx, fmt.Sprintf("jetton/wallets?owner_address=%s&limit=100&offset=%d", url.QueryEscape(a), offset))
@@ -436,34 +501,11 @@ func (s *Service) routeEvent(ctx context.Context, id, ceiling int64, source, n s
 	if pending != 0 {
 		return errors.New("awaiting scanner boundary")
 	}
-	ev, e := s.evidence(ctx, n, source, p)
+	assets, e := s.transactionAssets(ctx, n, source, p)
 	if e != nil {
 		return e
 	}
-	contracts := map[string]bool{}
-	var c candidates
-	switch {
-	case chainIDs[n] != 0:
-		c = parseEVM(n, ev, contracts)
-	case n == "bitcoin":
-		changes, err := bitcoinChanges(ev.data)
-		if err != nil {
-			return err
-		}
-		c = candidates{}
-		for addr := range changes {
-			c.add(n, addr, "native")
-		}
-	case n == "solana":
-		c = parseSolana(n, ev.data)
-	default:
-		c = parseOther(n, ev.data)
-	}
-	if n == "aptos" {
-		if e := s.aptosOwners(ctx, ev, c); e != nil {
-			return e
-		}
-	}
+	ev, c, contracts := assets.evidence, assets.candidates, assets.contracts
 	// If the scanner matched an address but the evidence doesn't identify its
 	// asset, refresh its known holdings as well as the native currency.
 	for _, a := range p.Get("activity.addresses").Array() {

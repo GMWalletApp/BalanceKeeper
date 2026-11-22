@@ -1,0 +1,120 @@
+{
+  "listen": "127.0.0.1:9082",
+  "database": "balancekeeper.db",
+  "token": "${BK_TOKEN}",
+  "scanner": "${CHAINSCANNER_URL}",
+  "scannerToken": "${CHAINSCANNER_CONSUMER_TOKEN}",
+  "broadcastSecret": "${BROADCASTER_NOTIFICATION_SECRET}",
+  "networks": {
+    "aptos": {
+      "rpc": "${APTOS_RPC_URL}",
+      "backup": {
+        "rpc": "https://aptos-rest.publicnode.com"
+      }
+    },
+    "arbitrum": {
+      "rpc": "${ARBITRUM_RPC_URL}",
+      "backup": {
+        "rpc": "https://arbitrum-one-rpc.publicnode.com"
+      }
+    },
+    "arc": {
+      "rpc": "${ARC_RPC_URL}",
+      "backup": {
+        "rpc": "https://arc-rpc.publicnode.com"
+      }
+    },
+    "avalanche": {
+      "rpc": "${AVALANCHE_RPC_URL}",
+      "backup": {
+        "rpc": "https://avalanche-c-chain-rpc.publicnode.com"
+      }
+    },
+    "base": {
+      "rpc": "${BASE_RPC_URL}",
+      "backup": {
+        "rpc": "https://base-rpc.publicnode.com"
+      },
+      "confirmations": 12
+    },
+    "binance": {
+      "rpc": "${BINANCE_RPC_URL}",
+      "backup": {
+        "rpc": "https://bsc-rpc.publicnode.com"
+      }
+    },
+    "bitcoin": {
+      "rpc": "${BITCOIN_ESPLORA_URL}",
+      "backup": {
+        "rpc": "https://mempool.space/api"
+      }
+    },
+    "ethereum": {
+      "rpc": "${ETHEREUM_RPC_URL}",
+      "backup": {
+        "rpc": "https://ethereum-rpc.publicnode.com"
+      },
+      "confirmations": 12
+    },
+    "hyperevm": {
+      "rpc": "${HYPEREVM_RPC_URL}",
+      "backup": {
+        "rpc": "https://hyperliquid-rpc.publicnode.com"
+      }
+    },
+    "monad": {
+      "rpc": "${MONAD_RPC_URL}",
+      "backup": {
+        "rpc": "https://rpc-mainnet.monadinfra.com"
+      }
+    },
+    "optimism": {
+      "rpc": "${OPTIMISM_RPC_URL}",
+      "backup": {
+        "rpc": "https://optimism-rpc.publicnode.com"
+      }
+    },
+    "plasma": {
+      "rpc": "${PLASMA_RPC_URL}",
+      "backup": {
+        "rpc": "https://rpc.plasma.to"
+      }
+    },
+    "polygon": {
+      "rpc": "${POLYGON_RPC_URL}",
+      "backup": {
+        "rpc": "https://polygon-bor-rpc.publicnode.com"
+      }
+    },
+    "robinhood": {
+      "rpc": "${ROBINHOOD_RPC_URL}",
+      "backup": {
+        "rpc": "https://robinhood-rpc.publicnode.com"
+      }
+    },
+    "solana": {
+      "rpc": "${SOLANA_RPC_URL}",
+      "backup": {
+        "rpc": "https://public.rpc.solanavibestation.com"
+      }
+    },
+    "sui": {
+      "rpc": "${SUI_GRPC_URL}",
+      "backup": {
+        "rpc": "https://sui-grpc.publicnode.com:443"
+      }
+    },
+    "ton": {
+      "rpc": "${TON_RPC_URL}",
+      "backup": {
+        "rpc": "https://toncenter.com"
+      }
+    },
+    "tron": {
+      "rpc": "${TRON_RPC_URL}",
+      "backup": {
+        "rpc": "https://tron-rpc.publicnode.com"
+      }
+    }
+  }
+}

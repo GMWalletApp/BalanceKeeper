@@ -39,17 +39,20 @@ func bitcoinHash(h string) bool {
 }
 
 func (s *Service) bitcoinText(ctx context.Context, path string) (string, error) {
-	cfg := s.cfg.Networks["bitcoin"]
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cfg.RPC, "/")+path, nil)
+	cfg := s.network(ctx, "bitcoin")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, nodeURL(cfg.RPC, path), nil)
 	if err != nil {
-		return "", err
+		return "", errors.New("invalid Bitcoin index URL")
 	}
 	if cfg.Bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.Bearer)
 	}
 	res, err := s.http.Do(req)
 	if err != nil {
-		return "", err
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", errors.New("Bitcoin index request failed")
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {

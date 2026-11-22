@@ -51,21 +51,33 @@ func (s *Service) observe(ctx context.Context, id int64, t, source, key string, 
 		return "", e
 	}
 	minimum := max(minHeight, start-1, prior.Int64)
-	val, re := s.balance(ctx, n, a, t, minimum)
-	if re == nil && (chainIDs[n] != 0 || n == "bitcoin") && strings.HasPrefix(key, "tx/") {
-		var canonical point
-		var err error
-		if n == "bitcoin" {
-			canonical.Block, err = s.bitcoinHashAt(ctx, minHeight)
-		} else {
-			canonical, err = s.evmBlock(ctx, n, minHeight)
+	type observation struct {
+		reading
+		orphan bool
+	}
+	val, re := readNodes(ctx, s, n, func(ctx context.Context) (observation, error) {
+		v, err := s.balance(ctx, n, a, t, minimum)
+		result := observation{reading: v}
+		if err != nil || !strings.HasPrefix(key, "tx/") {
+			return result, err
 		}
-		if err != nil {
-			re = err
-		} else if !strings.HasSuffix(key, "/"+strings.ToLower(canonical.Block)) {
-			_, err = s.db.ExecContext(ctx, "DELETE FROM jobs WHERE watch=? AND token=? AND observation=?", id, t, key)
-			return "", err
+		var hash string
+		switch {
+		case n == "bitcoin":
+			hash, err = s.bitcoinHashAt(ctx, minHeight)
+		case chainIDs[n] != 0:
+			var p point
+			p, err = s.evmBlock(ctx, n, minHeight)
+			hash = p.Block
+		default:
+			return result, nil
 		}
+		result.orphan = err == nil && !strings.HasSuffix(key, "/"+strings.ToLower(hash))
+		return result, err
+	})
+	if re == nil && val.orphan {
+		_, err := s.db.ExecContext(ctx, "DELETE FROM jobs WHERE watch=? AND token=? AND observation=?", id, t, key)
+		return "", err
 	}
 	observed := nowStamp()
 	e = s.atomic(ctx, func(tx *sql.Tx) error {
