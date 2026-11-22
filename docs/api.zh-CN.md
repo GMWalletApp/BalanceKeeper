@@ -10,7 +10,7 @@
 | 查询登记状态 | `POST /v1/watches/status` | 无 |
 | 查询当前余额 | `POST /v1/balances/query` | 可选 `tokens` |
 | 主动刷新余额 | `POST /v1/refreshes` | 可选 `tokens` |
-| 查询快照历史 | `POST /v1/snapshots/query` | 可选 `tokens`、`limit`、`before` |
+| 查询快照历史 | `POST /v1/snapshots/query` | 可选 `tokens`、`from`、`to`、`limit`、`before` |
 | 删除地址及其数据 | `POST /v1/watches/delete` | 无，按网络和地址整组删除 |
 
 上表六个业务接口都接收非空 JSON 数组。每项必填一个具体的 `network` 和一个 `address`，包括只操作一项的请求。监听同一个 EVM 地址的多条链，要逐链填写数组项。路径和查询字符串都不携带业务参数。请求头使用 `Authorization: Bearer <BK_TOKEN>` 和 `Content-Type: application/json`。
@@ -29,7 +29,7 @@
 
 ## 初始化地址
 
-`POST /v1/watches`。每项的 `assets` 只用于该地址在该网络的初始化。每项资产必填展示名称 `name` 和 `contract_address`（原生币传 JSON `null`）。空资产列表仍建立地址订阅；随后发现的新资产由 BalanceKeeper 自动维护。
+`POST /v1/watches`。每项的 `assets` 只用于该地址在该网络的初始化。每项资产必填展示名称 `name` 和 `contract_address`（原生币传 JSON `null`）。空资产列表仍建立地址订阅；随后发现的新资产由 BalanceKeeper 自动维护。收到订阅成功回执后，按初始列表逐项查询链上余额。每项首次读取成功时写入一条 `initial` 快照，零余额也写入。读取失败的项保留待重试。空列表和重复提交同一登记请求都不会额外生成初始快照。
 
 ```http
 POST /v1/watches HTTP/1.1
@@ -129,7 +129,7 @@ Content-Type: application/json
 
 ## 查询快照历史
 
-`POST /v1/snapshots/query`。每项可独立填写 `limit`（默认 50，范围 1–200）及 `before`（字符串游标）。先按该项的网络、地址和 token 范围筛选，再按快照 ID 数值递减分页。每项得到独立的 `items` 和 `next_before`。下一次请求可以只传还有下一页的数组项，沿用原范围，并把该项的 `next_before` 填入 `before`。末页游标为 `null`，无历史的已登记地址返回空页。
+`POST /v1/snapshots/query`。每项可独立填写 `limit`（默认 50，范围 1–200）及 `before`（字符串游标）。可选 `from`（含）和 `to`（不含）按刷新时间 `observed_at` 筛选，使用 UTC RFC 3339 时间；省略一端表示该端不限。时间格式无效或同时给出两端且 `from >= to` 时返回 HTTP 400 并指出该项索引。先按网络、地址、token 和时间范围筛选，再按快照 ID 数值递减分页。每项得到独立的 `items` 和 `next_before`。下一次请求可以只传还有下一页的数组项，沿用原范围，并把该项的 `next_before` 填入 `before`。末页游标为 `null`，无历史的已登记地址返回空页。
 
 ```http
 POST /v1/snapshots/query HTTP/1.1
@@ -137,19 +137,23 @@ Authorization: Bearer <BK_TOKEN>
 Content-Type: application/json
 
 [
-  {"network":"base","address":"0x1111111111111111111111111111111111111111","limit":1},
-  {"network":"ethereum","address":"0x1111111111111111111111111111111111111111","tokens":["native"],"limit":10}
+  {"network":"base","address":"0x1111111111111111111111111111111111111111","from":"2026-11-22T00:00:00Z","to":"2026-11-23T00:00:00Z","limit":1},
+  {"network":"ethereum","address":"0x1111111111111111111111111111111111111111","tokens":["native"],"from":"2026-11-22T00:00:00Z","to":"2026-11-23T00:00:00Z","limit":10}
 ]
 ```
 
 ```json
 {"results":[
-  {"network":"base","address":"0x1111111111111111111111111111111111111111","items":[{"asset":{"name":"USDC","contract_address":"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"},"snapshot":{"id":"44","amount_raw":"1250000","decimals":6,"height":"12345690","observed_at":"2026-11-22T08:30:24Z","source":"manual","event":null}}],"next_before":"44"},
+  {"network":"base","address":"0x1111111111111111111111111111111111111111","items":[{"asset":{"name":"USDC","contract_address":"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"},"snapshot":{"id":"44","amount_raw":"1250000","decimals":6,"height":"12345690","block_time":"2026-11-22T08:30:20Z","observed_at":"2026-11-22T08:30:24Z","source":"manual","event":null}}],"next_before":"44"},
   {"network":"ethereum","address":"0x1111111111111111111111111111111111111111","items":[],"next_before":null}
 ]}
 ```
 
 每条快照记录当时的资产名称、原始金额、精度（未知为 `null`）、观测时间、RPC 读取高度（无法精确取得时为 `null`）和来源。`source` 可为 `initial`、`manual`、`chainscanner`、`broadcaster`、`reconcile`。事件触发的快照在 `event` 中保存 `tx_id` 和事件高度。ChainScanner 来源另存 `delivery_id`，Broadcaster 来源另存 `event_id` 和 `broadcast_hash`。非事件触发时 `event` 为 `null`。RPC 读取高度可晚于事件高度。
+
+`observed_at` 是成功读取余额的刷新时间，每条快照都有。`block_time` 是该余额对应区块的链上时间，使用 UTC RFC 3339；无法核实对应区块或其时间时返回 `null`。触发通知的交易可能早于余额读取，两者各用各自的链上位置。
+
+接口返回各资产实际采集的快照，前端可据此绘图。整地址结果中各资产可能在不同时间刷新。两个数据点之间没有快照，只表示该资产在这段时间没有新的余额读数。
 
 ## 删除地址及其全部记录
 
