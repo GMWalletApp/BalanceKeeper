@@ -186,52 +186,31 @@ func (s *Service) tonIndex(ctx context.Context, path string) (gjson.Result, erro
 	v, _, e := s.request(ctx, "GET", strings.TrimRight(base, "/")+"/api/v3/"+path, bearer, nil)
 	return v, e
 }
-func (s *Service) lookup(ctx context.Context, n, hash string) (gjson.Result, error) {
-	v, _, e := s.request(ctx, "GET", s.cfg.Scanner+"/v1/transactions/"+url.PathEscape(n)+"/"+url.PathEscape(hash), s.cfg.ScannerToken, nil)
-	if e != nil {
-		return v, e
+
+// Fetch transaction details from the history endpoint configured for this network.
+func (s *Service) fullTransaction(ctx context.Context, n, hash string) (gjson.Result, error) {
+	switch n {
+	case "solana":
+		return s.rpc(ctx, n, "getTransaction", hash, M{"commitment": "finalized", "encoding": "json", "maxSupportedTransactionVersion": 1})
+	case "aptos":
+		return s.rest(ctx, n, "/v1/transactions/by_hash/"+url.PathEscape(hash), nil)
+	case "sui":
+		return s.suiTransaction(ctx, hash)
+	case "tron":
+		tx, err := s.rest(ctx, n, "/walletsolidity/gettransactionbyid", M{"value": hash})
+		if err != nil {
+			return gjson.Result{}, err
+		}
+		receipt, err := s.rest(ctx, n, "/walletsolidity/gettransactioninfobyid", M{"value": hash})
+		if err != nil {
+			return gjson.Result{}, err
+		}
+		return gjson.Parse(compact(M{"transaction": json.RawMessage(tx.Raw), "receipt": json.RawMessage(receipt.Raw)})), nil
+	default:
+		return gjson.Result{}, invalidEvidence
 	}
-	if v.Get("network").Str != n || v.Get("hash").Str != hash || !v.Get("result").IsObject() {
-		return v, invalidEvidence
-	}
-	return v.Get("result"), nil
 }
 
-// Read the chain's own transaction format by hash. ChainScanner's separate
-// transaction lookup is a fallback for an unavailable local history endpoint.
-func (s *Service) fullTransaction(ctx context.Context, n, hash string) (gjson.Result, error) {
-	var v gjson.Result
-	var err error
-	switch n {
-	case "solana":
-		v, err = s.rpc(ctx, n, "getTransaction", hash, M{"commitment": "finalized", "encoding": "json", "maxSupportedTransactionVersion": 1})
-	case "aptos":
-		v, err = s.rest(ctx, n, "/v1/transactions/by_hash/"+url.PathEscape(hash), nil)
-	case "sui":
-		v, err = s.suiTransaction(ctx, hash)
-	case "tron":
-		tx, te := s.rest(ctx, n, "/walletsolidity/gettransactionbyid", M{"value": hash})
-		receipt, re := s.rest(ctx, n, "/walletsolidity/gettransactioninfobyid", M{"value": hash})
-		if te == nil && re == nil && tx.IsObject() && receipt.IsObject() && receipt.Get("id").Exists() {
-			v = gjson.Parse(compact(M{"transaction": json.RawMessage(tx.Raw), "receipt": json.RawMessage(receipt.Raw)}))
-		}
-	}
-	var includesEffects bool
-	switch n {
-	case "solana":
-		includesEffects = v.Get("transaction.signatures.0").Str == hash && v.Get("slot").Exists() && v.Get("meta.preBalances").IsArray() && v.Get("meta.postBalances").IsArray()
-	case "aptos":
-		includesEffects = strings.EqualFold(v.Get("hash").Str, hash) && v.Get("changes").IsArray()
-	case "sui":
-		includesEffects = v.Get("digest").Str == hash && v.Get("checkpoint").Exists()
-	case "tron":
-		includesEffects = strings.EqualFold(v.Get("receipt.id").Str, hash) && strings.EqualFold(v.Get("transaction.txID").Str, hash)
-	}
-	if err != nil || !includesEffects {
-		return s.lookup(ctx, n, hash)
-	}
-	return v, nil
-}
 func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result) (evidence, error) {
 	var ev evidence
 	var e error
@@ -250,7 +229,6 @@ func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result
 		if e != nil {
 			return ev, e
 		}
-		ev.data = a.Get("data")
 	} else {
 		ev.hash, e = normalizeHash(family, p.Get("hash").Str)
 		if e != nil {
@@ -318,7 +296,7 @@ func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result
 		switch n {
 		case "solana":
 			ev.height, e = number(v.Get("slot"), 10)
-			if v.Get("transaction.signatures.0").Str != ev.hash || !v.Get("meta.preBalances").IsArray() || !v.Get("meta.postBalances").IsArray() || !v.Get("transaction.message.accountKeys").IsArray() {
+			if v.Get("transaction.signatures.0").Str != ev.hash || !v.Get("meta.preBalances").IsArray() || !v.Get("meta.postBalances").IsArray() || !v.Get("meta.postBalances").IsArray() || !v.Get("transaction.message.accountKeys").IsArray() {
 				return ev, invalidEvidence
 			}
 		case "sui":

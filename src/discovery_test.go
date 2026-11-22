@@ -147,12 +147,16 @@ func TestPartialDeliveryBundledSwapAndDelegatedExecution(t *testing.T) {
 		}
 	}
 	registerActive(t, s, mintRecipient)
-	event := compact(M{"id": 10, "activity": M{"network": "base", "tx_id": hash, "height": 10, "addresses": []string{walletA}, "data": M{"transaction": tx, "receipt": M{"logs": logs[:1]}}}})
+	event := compact(M{"id": 10, "activity": M{"network": "base", "tx_id": hash, "height": 10, "addresses": []string{walletA}, "data": M{"transaction": tx, "receipt": M{"logs": logs[:1]}, "trace": M{"type": "CALL", "from": walletA, "to": failed}}}})
 	if _, e := s.db.Exec("INSERT INTO inbox(source,identity,digest,network,payload,ceiling) VALUES('chainscanner','fixture','fixture','base',?,6)", event); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := s.nextInbox(t.Context()); e == nil {
 		t.Fatal("temporary trace failure was lost")
+	}
+	var probes int
+	if err := s.db.QueryRow("SELECT count(*) FROM evm_probes WHERE token=?", failed).Scan(&probes); err != nil || probes != 0 {
+		t.Fatal("used a trace from the notification", probes, err)
 	}
 	drain(t, s.nextJob)
 	balances := func(a string) gjson.Result {
@@ -281,17 +285,30 @@ func TestSolanaPartialNotificationFetchesClosedAndNewMints(t *testing.T) {
 		"preTokenBalances":  []M{{"accountIndex": 2, "owner": a, "mint": splProgram, "uiTokenAmount": M{"amount": "15"}}},
 		"postTokenBalances": []M{{"accountIndex": 3, "owner": a, "mint": token2022, "uiTokenAmount": M{"amount": "8"}}},
 	}}
+	var attempts atomic.Int32
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		req := gjson.ParseBytes(b)
 		if req.Get("method").Str != "getTransaction" || req.Get("params.1.commitment").Str != "finalized" {
 			t.Error(req)
 		}
-		json.NewEncoder(w).Encode(M{"id": 1, "result": tx})
+		switch attempts.Add(1) {
+		case 1:
+			http.Error(w, "node unavailable", http.StatusServiceUnavailable)
+		case 2:
+			json.NewEncoder(w).Encode(M{"id": 1, "result": M{"slot": 12}})
+		default:
+			json.NewEncoder(w).Encode(M{"id": 1, "result": tx})
+		}
 	}))
 	defer mock.Close()
-	s := Service{cfg: Config{Networks: map[string]Network{"solana": {RPC: mock.URL}}}, http: mock.Client()}
+	s := Service{cfg: Config{Scanner: mock.URL + "/scanner", Networks: map[string]Network{"solana": {RPC: mock.URL}}}, http: mock.Client()}
 	p := gjson.Parse(compact(M{"activity": M{"tx_id": signature, "height": 12, "data": M{"meta": M{}}}}))
+	for range 2 {
+		if _, err := s.evidence(t.Context(), "solana", "chainscanner", p); err == nil {
+			t.Fatal("accepted unavailable or incomplete transaction")
+		}
+	}
 	ev, e := s.evidence(t.Context(), "solana", "chainscanner", p)
 	if e != nil {
 		t.Fatal(e)

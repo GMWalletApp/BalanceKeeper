@@ -13,17 +13,13 @@ import (
 )
 
 func (s *Service) evmEvidence(ctx context.Context, n string, ev evidence, scanner bool) (evidence, error) {
-	delivered := ev.data
-	// Read the entire receipt even when the delivery already contains logs.
-	// A successful lookup can legitimately return an empty log list.
-	tx, txErr := s.rpc(ctx, n, "eth_getTransactionByHash", ev.hash)
-	receipt, receiptErr := s.rpc(ctx, n, "eth_getTransactionReceipt", ev.hash)
-	if txErr != nil || receiptErr != nil || !strings.EqualFold(tx.Get("hash").Str, ev.hash) || !strings.EqualFold(receipt.Get("transactionHash").Str, ev.hash) || !receipt.Get("logs").IsArray() || !tx.Get("blockNumber").Exists() {
-		full, err := s.lookup(ctx, n, ev.hash)
-		if err != nil {
-			return ev, err
-		}
-		tx, receipt = full.Get("transaction"), full.Get("receipt")
+	tx, err := s.rpc(ctx, n, "eth_getTransactionByHash", ev.hash)
+	if err != nil {
+		return ev, err
+	}
+	receipt, err := s.rpc(ctx, n, "eth_getTransactionReceipt", ev.hash)
+	if err != nil {
+		return ev, err
 	}
 	if !tx.IsObject() || !receipt.IsObject() {
 		return ev, errors.New("transaction or receipt unavailable")
@@ -63,9 +59,6 @@ func (s *Service) evmEvidence(ctx context.Context, n string, ev evidence, scanne
 	ev.data = gjson.Parse(compact(M{"transaction": json.RawMessage(tx.Raw), "receipt": json.RawMessage(receipt.Raw)}))
 	ev.height, ev.block = h, block
 	if receipt.Get("status").Str != "0x0" {
-		if strings.EqualFold(delivered.Get("transaction.blockHash").Str, block) && strings.EqualFold(delivered.Get("transaction.hash").Str, ev.hash) {
-			ev.trace = delivered.Get("trace")
-		}
 		tr, err := s.rpc(ctx, n, "debug_traceTransaction", ev.hash, M{"tracer": "callTracer"})
 		switch {
 		case err == nil && tr.IsObject() && tr.Get("type").Str != "":

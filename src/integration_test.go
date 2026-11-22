@@ -54,10 +54,9 @@ func TestWalletLifecycle(t *testing.T) {
 	transfer := M{"address": testToken, "topics": []string{"0x" + transferTopic, "0x" + strings.Repeat("0", 24) + walletB[2:], "0x" + strings.Repeat("0", 24) + walletA[2:]}, "data": "0x" + strings.Repeat("0", 63) + "1"}
 	tx := M{"hash": hash, "from": walletB, "to": testToken, "value": "0x0", "blockNumber": "0x64", "blockHash": block}
 	receipt := M{"transactionHash": hash, "blockHash": block, "blockNumber": "0x64", "logs": []any{transfer}, "status": "0x1"}
-	data := M{"transaction": tx, "receipt": receipt}
 	var amount, acks atomic.Int64
 	amount.Store(100)
-	var confirmed atomic.Bool
+	var confirmed, balanceOffline atomic.Bool
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		in := gjson.ParseBytes(b)
@@ -69,12 +68,6 @@ func TestWalletLifecycle(t *testing.T) {
 				regs = append(regs, M{"network": target.Get("network").Str, "address": target.Get("address").Str, "from_height": 99})
 			}
 			reply = M{"registrations": regs}
-		case "/v1/transactions/base/" + hash:
-			v := data
-			if !confirmed.Load() {
-				v = M{"transaction": tx, "receipt": nil}
-			}
-			reply = M{"network": "base", "hash": hash, "result": v}
 		case "/v1/events/next":
 			reply = M{"id": 17, "activity": M{"network": "base", "height": 100, "addresses": []string{walletA}, "tx_id": hash, "data": M{"transaction": tx, "logs": []M{}}}}
 		case "/v1/events/17/ack":
@@ -102,6 +95,10 @@ func TestWalletLifecycle(t *testing.T) {
 			case "eth_getBalance":
 				result = "0x0"
 			case "eth_call":
+				if balanceOffline.Load() {
+					http.Error(w, "node unavailable", 503)
+					return
+				}
 				num := amount.Load()
 				if in.Get("params.0.data").Str == "0x313ce567" {
 					num = 6
@@ -174,6 +171,18 @@ func TestWalletLifecycle(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	confirmed.Store(false)
+	if worked, err := s.nextInbox(ctx); !worked || err == nil {
+		t.Fatal("missing local receipt should defer the delivery", worked, err)
+	}
+	var retry bool
+	if err := s.db.QueryRow("SELECT done=0 AND attempts=1 AND due>0 FROM inbox WHERE source='chainscanner'").Scan(&retry); err != nil || !retry {
+		t.Fatal("delivery was not retained for retry", retry, err)
+	}
+	confirmed.Store(true)
+	if _, err := s.db.Exec("UPDATE inbox SET due=0 WHERE source='chainscanner'"); err != nil {
+		t.Fatal(err)
+	}
 	step(t, s.nextInbox)
 	drain(t, s.nextJob)
 	snapshots := func() gjson.Result { return post(t, s, "/v1/snapshots/query", batch, 200).Get("results.0.items") }
@@ -220,6 +229,24 @@ func TestWalletLifecycle(t *testing.T) {
 	}
 	if v := post(t, s, "/v1/watches/status", []M{{"network": "base", "address": walletB}}, 200).Get("results.0.error.code").Str; v != "watch_not_found" {
 		t.Fatal("partial commit", v)
+	}
+	balanceOffline.Store(true)
+	failure := post(t, s, "/v1/refreshes", []M{sel, sel}, 200)
+	if failure.Get("results.0.status").Str != "failed" {
+		t.Fatal(failure)
+	}
+	beforeRetry := len(snapshots().Array())
+	if v := post(t, s, "/v1/balances/query", []M{sel}, 200).Get("results.0.balances." + testToken).Str; v != "5" {
+		t.Fatal("failed read changed balance", v)
+	}
+	if _, err := s.db.Exec("UPDATE jobs SET due=0 WHERE source='manual'"); err != nil {
+		t.Fatal(err)
+	}
+	balanceOffline.Store(false)
+	amount.Store(8)
+	drain(t, s.nextJob)
+	if rows := snapshots(); len(rows.Array()) != beforeRetry+1 || rows.Get("0.snapshot.amount_raw").Str != "8" || rows.Get("0.snapshot.source").Str != "manual" {
+		t.Fatal("manual retry", rows)
 	}
 	post(t, s, "/v1/watches/delete", batch, 200)
 	post(t, s, "/v1/watches", init, 202)

@@ -4,7 +4,7 @@ BalanceKeeper 为钱包和支付服务维护指定地址的资产余额。调用
 
 服务端使用 Go 和 SQLite。余额查询直接读本地记录，主动刷新和事件消费向对应网络的节点读取余额。[完整 HTTP 接口](docs/api.zh-CN.md) · [ChainScanner 对接与各链 RPC](docs/chains.zh-CN.md)
 
-BalanceKeeper 作为消费者调用 ChainScanner 现有的订阅和事件接口。部署时给 BalanceKeeper 配置 ChainScanner 地址和消费者令牌即可复用监听服务。各链的资产识别、余额查询和快照写入均由 BalanceKeeper 实现。
+BalanceKeeper 作为消费者调用 ChainScanner 现有的订阅和事件接口。部署时给 BalanceKeeper 配置 ChainScanner 地址和消费者令牌即可复用监听服务。BalanceKeeper 按通知中的交易哈希向本服务配置的链节点或索引查询交易详情和余额，再写入快照。节点暂时不可用或回执尚未就绪时，任务保存在 SQLite，由 BalanceKeeper 退避重试。
 
 Broadcaster 的全局通知提供另一条刷新入口：节点接收交易后推送网络与哈希，BalanceKeeper 按哈希核验入块和受影响资产，只刷新本地跟踪的钱包。钱包地址只需登记在 BalanceKeeper。[广播通知与余额刷新](docs/api.zh-CN.md#broadcaster)
 

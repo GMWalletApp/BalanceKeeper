@@ -80,8 +80,17 @@ func (s *Service) observe(ctx context.Context, id int64, t, source, key string, 
 			return e
 		}
 		if re != nil {
-			_, e := tx.ExecContext(ctx, "UPDATE assets SET last_error=? WHERE watch=? AND token=?", re.Error(), id, t)
-			return e
+			if _, err := tx.ExecContext(ctx, "UPDATE assets SET last_error=? WHERE watch=? AND token=?", re.Error(), id, t); err != nil {
+				return err
+			}
+			// A synchronous manual read has no existing job. Persist this failed
+			// observation alongside last_error so the worker can finish it.
+			if source == "manual" && key == "" {
+				_, err := tx.ExecContext(ctx, `INSERT INTO jobs(watch,token,source,observation,min_height,due,attempts)
+					VALUES(?,?,'manual','manual/'||lower(hex(randomblob(16))),?,?,1)`, id, t, minimum, backoff(0))
+				return err
+			}
+			return nil
 		}
 		if val.Name == "" && t == "native" {
 			val.Name = nativeSymbols[n]
