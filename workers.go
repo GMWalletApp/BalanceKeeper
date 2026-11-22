@@ -253,6 +253,14 @@ func (s *Service) start(ctx context.Context) *sync.WaitGroup {
 	}
 	wg.Go(func() { s.loop(ctx, s.nextInbox) })
 	wg.Go(func() { s.loop(ctx, s.nextGap) })
+	for range 4 {
+		wg.Go(func() { s.loop(ctx, s.nextProbe) })
+	}
+	for n := range s.cfg.Networks {
+		if s.ownerInventoryEnabled(n) {
+			wg.Go(func() { s.loop(ctx, func(ctx context.Context) (bool, error) { return s.nextInventory(ctx, n) }) })
+		}
+	}
 	if _, enabled := s.cfg.Networks["ton"]; enabled {
 		wg.Go(func() { s.loop(ctx, s.nextJettonOwner) })
 	}
@@ -353,7 +361,7 @@ func finishInbox(ctx context.Context, tx *sql.Tx, id int64) error {
 	return e
 }
 func (s *Service) knownTokens(ctx context.Context, id int64) ([]string, error) {
-	rows, e := s.db.QueryContext(ctx, "SELECT token FROM assets WHERE watch=? AND (amount IS NULL OR amount<>'0')", id)
+	rows, e := s.db.QueryContext(ctx, "SELECT token FROM assets WHERE watch=?", id)
 	if e != nil {
 		return nil, e
 	}

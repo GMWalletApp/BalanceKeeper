@@ -9,10 +9,13 @@ import (
 	"time"
 
 	pb "github.com/block-vision/sui-go-sdk/pb/sui/rpc/v2"
+	"github.com/tidwall/gjson"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
 func (s *Service) suiConn(ctx context.Context) (context.Context, *grpc.ClientConn, func(), error) {
@@ -81,4 +84,21 @@ func (s *Service) suiBalance(ctx context.Context, a, t string) (reading, error) 
 		}
 	}
 	return reading{Name: name, Amount: strconv.FormatUint(r.GetBalance().GetBalance(), 10), Decimals: dec}, nil
+}
+
+func (s *Service) suiTransaction(ctx context.Context, hash string) (gjson.Result, error) {
+	ctx, c, close, e := s.suiConn(ctx)
+	if e != nil {
+		return gjson.Result{}, e
+	}
+	defer close()
+	r, e := pb.NewLedgerServiceClient(c).GetTransaction(ctx, &pb.GetTransactionRequest{Digest: &hash, ReadMask: &fieldmaskpb.FieldMask{Paths: []string{"digest", "checkpoint", "transaction.sender", "transaction.gas_payment.owner", "effects.changed_objects", "balance_changes"}}})
+	if e != nil {
+		return gjson.Result{}, e
+	}
+	if r.GetTransaction() == nil {
+		return gjson.Result{}, invalidEvidence
+	}
+	b, e := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(r.GetTransaction())
+	return gjson.ParseBytes(b), e
 }

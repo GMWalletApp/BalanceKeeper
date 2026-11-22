@@ -30,12 +30,14 @@ var schema string
 
 type M = map[string]any
 type Network struct {
-	RPC           string `json:"rpc"`
-	Bearer        string `json:"bearer,omitempty"`
-	Confirmations int64  `json:"confirmations,omitempty"`
-	Index         string `json:"index,omitempty"`
-	IndexBearer   string `json:"indexBearer,omitempty"`
-	Cluster       string `json:"cluster,omitempty"`
+	RPC             string `json:"rpc"`
+	Bearer          string `json:"bearer,omitempty"`
+	Confirmations   int64  `json:"confirmations,omitempty"`
+	Index           string `json:"index,omitempty"`
+	IndexBearer     string `json:"indexBearer,omitempty"`
+	InventoryRPC    string `json:"tokenInventoryRPC,omitempty"`
+	InventoryBearer string `json:"tokenInventoryBearer,omitempty"`
+	Cluster         string `json:"cluster,omitempty"`
 }
 type Config struct {
 	Listen          string             `json:"listen"`
@@ -167,6 +169,13 @@ func run() error {
 		return errors.New("use a dedicated broadcast secret of at least 24 bytes")
 	}
 	for name, n := range c.Networks {
+		if n.InventoryRPC != "" {
+			n.InventoryRPC = os.ExpandEnv(n.InventoryRPC)
+			if chainIDs[name] == 0 || !validURL(n.InventoryRPC) {
+				return fmt.Errorf("invalid tokenInventoryRPC for %s", name)
+			}
+		}
+		n.InventoryBearer = os.ExpandEnv(n.InventoryBearer)
 		n.RPC = os.ExpandEnv(n.RPC)
 		n.Index = os.ExpandEnv(n.Index)
 		n.IndexBearer = os.ExpandEnv(n.IndexBearer)

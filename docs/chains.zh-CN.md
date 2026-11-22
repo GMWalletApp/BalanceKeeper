@@ -54,6 +54,20 @@ v1 使用 HTTP 长轮询，每个消费者在每个网络运行一个读取循�
 
 EVM 适配器共用一套读取逻辑，网络 ID 与 ChainScanner 保持一致：`ethereum`、`arbitrum`、`binance`、`avalanche`、`polygon`、`optimism`、`base`、`hyperevm`、`monad`、`arc`、`plasma`、`robinhood`。启动时核对节点 chain ID。各链原生资产均以 `contract_address:null` 登记；已知与原生资产等价的链上别名应归一或在登记时拒绝重复。
 
+<a id="asset-discovery"></a>
+
+## 复杂交易的资产发现范围
+
+| 交易情况 | 如何确定需要重读的资产 |
+| --- | --- |
+| DEX swap、路由、多跳与批量转账 | 按哈希读取交易和完整回执，核对交易哈希、区块号和规范区块哈希。遍历全部日志，将每笔 ERC-20 转账的合约分别分配给真实收发钱包。同一钱包、区块内交易和 token 共用一次成功观测。 |
+| ERC-4337 与 EIP-7702 | 对每个 `UserOperationEvent` 分别匹配 sender 和 paymaster，再处理整笔交易的代币费用、退款和转账。对 7702 授权组验签恢复授权者，并按本链 chain ID 过滤。授权目标指向的代码地址与授权钱包分别处理。 |
+| 内部调用、代理执行、部署新币 | 尝试 `debug_traceTransaction` 的 `callTracer`，遍历成功调用、`DELEGATECALL` 和 `CREATE/CREATE2`，跳过回滚的子树。从调用参数、事件主题和事件数据中的 ABI 地址字匹配已登记钱包，可发现只出现在自定义 mint 参数里的收款方。对回执或调用树中出现的未知合约，在事件高度检查钱包的 `balanceOf`、ERC-20 的 `allowance` 和 `totalSupply`，并排除声明 ERC-721 的合约。符合条件后进入正式余额读取队列。历史状态读取失败会重试。 |
+| 通知遗漏第二种币、此前已归零的币再次到账 | 对命中的每个登记钱包，同时重查已有的资产记录。完整回执已经识别的资产可先写快照，临时 trace 故障独立退避重试，补到的内部资产复用同一交易身份。 |
+| 无可识别日志的变动 | Solana 枚举两个 token program 的持仓，Sui 分页枚举 coin type，TON 使用 Jetton owner 索引。EVM 可配置 `tokenInventoryRPC` 分页枚举钱包持仓。索引金额仅用于识别差异；新币、余额差异及索引中消失的旧持仓均通过本链 RPC 核验。 |
+
+完整回执覆盖整笔交易中符合 ERC-20 规范的转账事件，包括嵌套调用产生的日志。标准 EVM RPC 没有按 owner 列出所有 ERC-20 的方法。对于静默 rebase、只修改内部记账的协议，或从未出现在回执及可用调用树里的新 token，发现能力取决于持仓索引覆盖范围。索引延迟期间保留上次成功读数；后续对账写入实际读到的余额。ERC-721、ERC-1155 和协议内部份额不在本服务的同质化 token 余额模型中。[ERC-20 事件规范](https://eips.ethereum.org/EIPS/eip-20) · [Geth 调用树](https://geth.ethereum.org/docs/developers/evm-tracing/built-in-tracers) · [ERC-4337](https://eips.ethereum.org/EIPS/eip-4337) · [EIP-7702](https://eips.ethereum.org/EIPS/eip-7702) · [持仓索引接口](https://www.alchemy.com/docs/data/token-api/token-api-endpoints/alchemy-get-token-balances)
+
 <a id="broadcast-refresh"></a>
 
 ## 按广播哈希触发余额刷新

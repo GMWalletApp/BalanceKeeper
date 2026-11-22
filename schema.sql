@@ -42,3 +42,12 @@ CREATE TABLE IF NOT EXISTS gaps (
  watch INTEGER PRIMARY KEY REFERENCES watches ON DELETE CASCADE, cursor INTEGER NOT NULL,
  end INTEGER NOT NULL, due INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT ''
 );
+
+-- Unclassified contracts touched by a transaction are isolated from real holdings.
+CREATE TABLE IF NOT EXISTS evm_probes (
+ id INTEGER PRIMARY KEY, watch INTEGER NOT NULL REFERENCES watches ON DELETE CASCADE,
+ token TEXT NOT NULL, observation TEXT NOT NULL,height INTEGER NOT NULL, source TEXT NOT NULL,
+ event TEXT NOT NULL, due INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+ UNIQUE(watch,token,observation)
+);
+CREATE INDEX IF NOT EXISTS due_probes ON evm_probes(due,id);

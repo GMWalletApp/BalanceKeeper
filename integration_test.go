@@ -76,7 +76,7 @@ func TestWalletLifecycle(t *testing.T) {
 			}
 			reply = M{"network": "base", "hash": hash, "result": v}
 		case "/v1/events/next":
-			reply = M{"id": 17, "activity": M{"network": "base", "height": 100, "addresses": []string{walletA}, "tx_id": hash, "data": data}}
+			reply = M{"id": 17, "activity": M{"network": "base", "height": 100, "addresses": []string{walletA}, "tx_id": hash, "data": M{"transaction": tx, "logs": []M{}}}}
 		case "/v1/events/17/ack":
 			acks.Add(1)
 			w.WriteHeader(204)
@@ -84,6 +84,15 @@ func TestWalletLifecycle(t *testing.T) {
 		case "/rpc":
 			var result any
 			switch in.Get("method").Str {
+			case "eth_getTransactionByHash":
+				result = tx
+			case "eth_getTransactionReceipt":
+				if confirmed.Load() {
+					result = receipt
+				}
+			case "debug_traceTransaction":
+				json.NewEncoder(w).Encode(M{"jsonrpc": "2.0", "id": 1, "error": M{"code": -32601, "message": "method not found"}})
+				return
 			case "eth_chainId":
 				result = "0x2105"
 			case "eth_blockNumber":
@@ -152,7 +161,7 @@ func TestWalletLifecycle(t *testing.T) {
 	included := M{"schemaVersion": 1, "eventId": "included", "family": "evm", "network": "8453", "event": "broadcast.included", "hash": hash, "txHash": hash}
 	post(t, s, path, []M{included}, 204)
 	step(t, s.nextInbox)
-	step(t, s.nextJob)
+	drain(t, s.nextJob)
 	if e = s.poll(ctx, "base"); e != nil {
 		t.Fatal(e)
 	}
@@ -166,9 +175,9 @@ func TestWalletLifecycle(t *testing.T) {
 		t.Fatal(e)
 	}
 	step(t, s.nextInbox)
-	step(t, s.nextJob)
+	drain(t, s.nextJob)
 	snapshots := func() gjson.Result { return post(t, s, "/v1/snapshots/query", batch, 200).Get("results.0.items") }
-	if rows := snapshots(); len(rows.Array()) != 2 || rows.Get("0.snapshot.source").Str != "broadcaster" {
+	if rows := snapshots(); len(rows.Array()) != 3 || rows.Get("0.snapshot.source").Str != "broadcaster" {
 		t.Fatal(rows)
 	}
 	if v := post(t, s, "/v1/balances/query", batch, 200).Get("results.0.balances." + testToken).Str; v != "100" {
@@ -177,7 +186,7 @@ func TestWalletLifecycle(t *testing.T) {
 	amount.Store(0)
 	sel := M{"network": "base", "address": walletA, "tokens": []string{testToken}}
 	post(t, s, "/v1/refreshes", []M{target, sel}, 200)
-	if len(snapshots().Array()) != 3 {
+	if len(snapshots().Array()) != 4 {
 		t.Fatal("overlapping refresh duplicated observation")
 	}
 	if v := post(t, s, "/v1/balances/query", []M{sel}, 200).Get("results.0.balances." + testToken).Str; v != "0" {
@@ -199,7 +208,7 @@ func TestWalletLifecycle(t *testing.T) {
 	for _, pair := range []struct {
 		k    string
 		want int
-	}{{"from", 1}, {"to", 3}} {
+	}{{"from", 1}, {"to", 4}} {
 		rows := post(t, s, "/v1/snapshots/query", []M{{"network": "base", "address": walletA, pair.k: from}}, 200).Get("results.0.items").Array()
 		if len(rows) != pair.want {
 			t.Fatal(pair, len(rows))

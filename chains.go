@@ -228,11 +228,14 @@ func number(v gjson.Result, base int) (int64, error) {
 	return x.Int64(), nil
 }
 func (s *Service) rpc(ctx context.Context, n, method string, params ...any) (gjson.Result, error) {
+	cfg := s.cfg.Networks[n]
+	return s.rpcAt(ctx, cfg.RPC, cfg.Bearer, method, params...)
+}
+func (s *Service) rpcAt(ctx context.Context, endpoint, bearer, method string, params ...any) (gjson.Result, error) {
 	if params == nil {
 		params = []any{}
 	}
-	cfg := s.cfg.Networks[n]
-	r, _, e := s.request(ctx, "POST", cfg.RPC, cfg.Bearer, M{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+	r, _, e := s.request(ctx, "POST", endpoint, bearer, M{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
 	if e != nil {
 		return r, e
 	}

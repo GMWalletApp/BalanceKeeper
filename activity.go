@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"time"
+
 	"errors"
 	"fmt"
 	"net/url"
@@ -31,6 +33,12 @@ func (c candidates) add(n, a, t string) {
 	}
 	c[a][t] = true
 }
+func (c candidates) touch(n, a string) {
+	a, e := canonical(n, a)
+	if e == nil && c[a] == nil {
+		c[a] = map[string]bool{}
+	}
+}
 func topicAddr(v gjson.Result) string {
 	h := strings.TrimPrefix(v.Str, "0x")
 	if len(h) != 64 || !strings.HasPrefix(h, strings.Repeat("0", 24)) {
@@ -49,33 +57,6 @@ func addLogs(c candidates, n string, logs gjson.Result) {
 		}
 	}
 }
-func parseEVM(n string, data gjson.Result) candidates {
-	c := candidates{}
-	tx := data.Get("transaction")
-	receipt := data.Get("receipt")
-	c.add(n, tx.Get("from").Str, "native")
-	if x, e := integer(tx.Get("value"), 16); e == nil && x.Sign() > 0 && receipt.Get("status").Str != "0x0" {
-		c.add(n, tx.Get("to").Str, "native")
-		c.add(n, receipt.Get("contractAddress").Str, "native")
-	}
-	addLogs(c, n, data.Get("logs"))
-	addLogs(c, n, receipt.Get("logs"))
-	var trace func(gjson.Result)
-	trace = func(v gjson.Result) {
-		if v.Get("error").Exists() {
-			return
-		}
-		if x, e := integer(v.Get("value"), 16); e == nil && x.Sign() > 0 {
-			c.add(n, v.Get("from").Str, "native")
-			c.add(n, v.Get("to").Str, "native")
-		}
-		for _, child := range v.Get("calls").Array() {
-			trace(child)
-		}
-	}
-	trace(data.Get("trace"))
-	return c
-}
 func parseSolana(n string, v gjson.Result) candidates {
 	c := candidates{}
 	keys := v.Get("transaction.message.accountKeys").Array()
@@ -84,11 +65,12 @@ func parseSolana(n string, v gjson.Result) candidates {
 	}
 	pre, post := v.Get("meta.preBalances").Array(), v.Get("meta.postBalances").Array()
 	for i, k := range keys {
+		a := k.Str
+		if k.IsObject() {
+			a = k.Get("pubkey").Str
+		}
+		c.touch(n, a)
 		if i >= len(pre) || i >= len(post) || pre[i].Raw != post[i].Raw {
-			a := k.Str
-			if k.IsObject() {
-				a = k.Get("pubkey").Str
-			}
 			c.add(n, a, "native")
 		}
 	}
@@ -137,6 +119,12 @@ func parseOther(n string, v gjson.Result) candidates {
 			}
 		}
 		c.add(n, v.Get("transaction.gas_payment.owner").Str, "native")
+		c.add(n, v.Get("transaction.gasPayment.owner").Str, "native")
+		c.touch(n, v.Get("transaction.sender").Str)
+		for _, o := range v.Get("effects.changed_objects").Array() {
+			c.touch(n, o.Get("input_owner.address").Str)
+			c.touch(n, o.Get("output_owner.address").Str)
+		}
 	case "aptos":
 		c.add(n, v.Get("sender").Str, "native")
 		c.add(n, v.Get("signature.fee_payer_address").Str, "native")
@@ -148,6 +136,9 @@ func parseOther(n string, v gjson.Result) candidates {
 		}
 		for _, r := range v.Get("changes").Array() {
 			typ := r.Get("data.type").Str
+			if r.Get("type").Str == "delete_resource" {
+				typ = r.Get("resource").Str
+			}
 			a := r.Get("address").Str
 			if strings.HasPrefix(typ, "0x1::coin::CoinStore<") && strings.HasSuffix(typ, ">") {
 				c.add(n, a, typ[len("0x1::coin::CoinStore<"):len(typ)-1])
@@ -176,10 +167,12 @@ func parseOther(n string, v gjson.Result) candidates {
 }
 
 type evidence struct {
-	hash   string
-	height int64
-	block  string
-	data   gjson.Result
+	hash       string
+	height     int64
+	block      string
+	data       gjson.Result
+	trace      gjson.Result
+	traceRetry error
 }
 
 func (s *Service) tonIndex(ctx context.Context, path string) (gjson.Result, error) {
@@ -202,6 +195,42 @@ func (s *Service) lookup(ctx context.Context, n, hash string) (gjson.Result, err
 		return v, invalidEvidence
 	}
 	return v.Get("result"), nil
+}
+
+// Read the chain's own transaction format by hash. ChainScanner's separate
+// transaction lookup is a fallback for an unavailable local history endpoint.
+func (s *Service) fullTransaction(ctx context.Context, n, hash string) (gjson.Result, error) {
+	var v gjson.Result
+	var err error
+	switch n {
+	case "solana":
+		v, err = s.rpc(ctx, n, "getTransaction", hash, M{"commitment": "finalized", "encoding": "json", "maxSupportedTransactionVersion": 1})
+	case "aptos":
+		v, err = s.rest(ctx, n, "/v1/transactions/by_hash/"+url.PathEscape(hash), nil)
+	case "sui":
+		v, err = s.suiTransaction(ctx, hash)
+	case "tron":
+		tx, te := s.rest(ctx, n, "/walletsolidity/gettransactionbyid", M{"value": hash})
+		receipt, re := s.rest(ctx, n, "/walletsolidity/gettransactioninfobyid", M{"value": hash})
+		if te == nil && re == nil && tx.IsObject() && receipt.IsObject() && receipt.Get("id").Exists() {
+			v = gjson.Parse(compact(M{"transaction": json.RawMessage(tx.Raw), "receipt": json.RawMessage(receipt.Raw)}))
+		}
+	}
+	var includesEffects bool
+	switch n {
+	case "solana":
+		includesEffects = v.Get("transaction.signatures.0").Str == hash && v.Get("slot").Exists() && v.Get("meta.preBalances").IsArray() && v.Get("meta.postBalances").IsArray()
+	case "aptos":
+		includesEffects = strings.EqualFold(v.Get("hash").Str, hash) && v.Get("changes").IsArray()
+	case "sui":
+		includesEffects = v.Get("digest").Str == hash && v.Get("checkpoint").Exists()
+	case "tron":
+		includesEffects = strings.EqualFold(v.Get("receipt.id").Str, hash) && strings.EqualFold(v.Get("transaction.txID").Str, hash)
+	}
+	if err != nil || !includesEffects {
+		return s.lookup(ctx, n, hash)
+	}
+	return v, nil
 }
 func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result) (evidence, error) {
 	var ev evidence
@@ -258,53 +287,35 @@ func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result
 			}
 		}
 	}
-	if !scanner && !ev.data.Exists() || scanner && !ev.data.IsObject() {
-		ev.data, e = s.lookup(ctx, n, ev.hash)
+	if family == "evm" {
+		return s.evmEvidence(ctx, n, ev, scanner)
+	}
+	// Fetch full per-transaction data. Scanner deliveries may contain a
+	// projection with well-formed but incomplete arrays of changes.
+	if n == "ton" && scanner {
+		rows, err := s.tonIndex(ctx, "transactions?limit=1&hash="+url.QueryEscape(ev.hash))
+		if err != nil {
+			return ev, err
+		}
+		row := rows.Get("transactions.0")
+		hash, err := normalizeHash("ton", row.Get("hash").Str)
+		if err != nil || hash != ev.hash || row.Get("account").Str == "" || row.Get("mc_block_seqno").Int() != ev.height {
+			return ev, invalidEvidence
+		}
+		ev.data = row
+	} else if n != "ton" {
+		ev.data, e = s.fullTransaction(ctx, n, ev.hash)
 		if e != nil {
 			return ev, e
 		}
 	}
 	v := ev.data
-	switch {
-	case chainIDs[n] != 0:
-		if scanner && (v.Get("transaction.blockHash").Str == "" || !v.Get("transaction.blockNumber").Exists() || (!v.Get("logs").IsArray() && !v.Get("receipt.logs").IsArray())) {
-			full, err := s.lookup(ctx, n, ev.hash)
-			if err != nil {
-				return ev, err
-			}
-			if !full.Get("transaction").IsObject() || !full.Get("receipt").IsObject() {
-				return ev, invalidEvidence
-			}
-			// The scanner may be the only source for an internal call trace.
-			v = gjson.Parse(compact(M{"transaction": json.RawMessage(full.Get("transaction").Raw), "receipt": json.RawMessage(full.Get("receipt").Raw), "trace": v.Get("trace").Value(), "logs": v.Get("logs").Value()}))
-			ev.data = v
-		}
-		tx, receipt := v.Get("transaction"), v.Get("receipt")
-		b := tx.Get("blockHash").Str
-		if b == "" || !scanner && !receipt.IsObject() {
-			return ev, errors.New("pending transaction")
-		}
-		if receipt.IsObject() && (!strings.EqualFold(receipt.Get("blockHash").Str, b) || !strings.EqualFold(receipt.Get("transactionHash").Str, ev.hash) || !receipt.Get("logs").IsArray()) {
-			return ev, invalidEvidence
-		}
-		if !strings.EqualFold(tx.Get("hash").Str, ev.hash) {
-			return ev, invalidEvidence
-		}
-		h, err := number(tx.Get("blockNumber"), 16)
-		if err != nil || scanner && ev.height != h {
-			return ev, invalidEvidence
-		}
-		canon, err := s.evmBlock(ctx, n, h)
-		if err != nil || !strings.EqualFold(canon.Block, b) {
-			return ev, invalidEvidence
-		}
-		ev.height = h
-		ev.block = strings.ToLower(b)
-	case !scanner:
+	deliveredHeight := ev.height
+	if n != "ton" || !scanner {
 		switch n {
 		case "solana":
 			ev.height, e = number(v.Get("slot"), 10)
-			if v.Get("transaction.signatures.0").Str != ev.hash || !v.Get("meta").IsObject() {
+			if v.Get("transaction.signatures.0").Str != ev.hash || !v.Get("meta.preBalances").IsArray() || !v.Get("meta.postBalances").IsArray() || !v.Get("transaction.message.accountKeys").IsArray() {
 				return ev, invalidEvidence
 			}
 		case "sui":
@@ -314,7 +325,7 @@ func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result
 			ev.height, e = number(v.Get("checkpoint"), 10)
 		case "aptos":
 			ev.height, e = number(v.Get("version"), 10)
-			if !strings.EqualFold(v.Get("hash").Str, ev.hash) || v.Get("type").Str == "pending_transaction" {
+			if !strings.EqualFold(v.Get("hash").Str, ev.hash) || v.Get("type").Str == "pending_transaction" || !v.Get("changes").IsArray() {
 				return ev, invalidEvidence
 			}
 		case "tron":
@@ -329,6 +340,9 @@ func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result
 			return ev, e
 		}
 	}
+	if scanner && ev.height != deliveredHeight {
+		return ev, invalidEvidence
+	}
 	if ev.block == "" {
 		ev.block = strconv.FormatInt(ev.height, 10)
 	}
@@ -341,10 +355,15 @@ func (s *Service) aptosOwners(ctx context.Context, ev evidence, c candidates) er
 	// address. Resolve the store and its owner at the event's ledger version.
 	stores := map[string]string{}
 	owners := map[string]string{}
+	deleted := map[string]bool{}
 	for _, r := range ev.data.Get("changes").Array() {
 		store, e := canonical("aptos", r.Get("address").Str)
 		if e != nil {
 			continue
+		}
+		if r.Get("type").Str == "delete_resource" && r.Get("resource").Str == "0x1::fungible_asset::FungibleStore" {
+			stores[store] = ""
+			deleted[store] = true
 		}
 		switch r.Get("data.type").Str {
 		case "0x1::fungible_asset::FungibleStore":
@@ -366,7 +385,11 @@ func (s *Service) aptosOwners(ctx context.Context, ev evidence, c candidates) er
 		}
 	}
 	resource := func(store, typ string) (gjson.Result, error) {
-		return s.rest(ctx, "aptos", "/v1/accounts/"+store+"/resource/0x1::"+typ+"?ledger_version="+strconv.FormatInt(ev.height, 10), nil)
+		height := ev.height
+		if deleted[store] && height > 0 {
+			height--
+		}
+		return s.rest(ctx, "aptos", "/v1/accounts/"+store+"/resource/0x1::"+typ+"?ledger_version="+strconv.FormatInt(height, 10), nil)
 	}
 	for store, token := range stores {
 		if token == "" {
@@ -436,10 +459,11 @@ func (s *Service) routeEvent(ctx context.Context, id, ceiling int64, source, n s
 	if e != nil {
 		return e
 	}
+	contracts := map[string]bool{}
 	var c candidates
 	switch {
 	case chainIDs[n] != 0:
-		c = parseEVM(n, ev.data)
+		c = parseEVM(n, ev, contracts)
 	case n == "solana":
 		c = parseSolana(n, ev.data)
 	default:
@@ -454,9 +478,36 @@ func (s *Service) routeEvent(ctx context.Context, id, ceiling int64, source, n s
 	// asset, refresh its known holdings as well as the native currency.
 	for _, a := range p.Get("activity.addresses").Array() {
 		addr, e := canonical(n, a.Str)
-		if e == nil && len(c[addr]) == 0 {
-			c[addr] = map[string]bool{"*": true, "native": true}
+		if e == nil && c[addr] == nil {
+			c.add(n, addr, "native")
 		}
+	}
+	// Large multi-calls can contain thousands of candidate recipients. Match
+	// them against this network's indexed registrations in one SQLite read.
+	if chainIDs[n] != 0 {
+		addrs := make([]string, 0, len(c))
+		for addr := range c {
+			addrs = append(addrs, addr)
+		}
+		rows, e := s.db.QueryContext(ctx, `SELECT w.address FROM json_each(?) a JOIN watches w ON w.network=? AND w.address=a.value WHERE w.id<=? AND w.start BETWEEN 0 AND ?`, compact(addrs), n, ceiling, ev.height)
+		if e != nil {
+			return e
+		}
+		matches := candidates{}
+		for rows.Next() {
+			var a string
+			if err := rows.Scan(&a); err != nil {
+				rows.Close()
+				return err
+			}
+			matches[a] = c[a]
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return e
+		}
+		c = matches
 	}
 	event := M{"height": strconv.FormatInt(ev.height, 10), "tx_id": ev.hash}
 	if source == "chainscanner" {
@@ -470,6 +521,8 @@ func (s *Service) routeEvent(ctx context.Context, id, ceiling int64, source, n s
 		t  string
 	}
 	targets := map[pair]bool{}
+	inventories := map[int64]bool{}
+	matched := map[int64]bool{}
 	for addr, tokens := range c {
 		var wid int64
 		e := s.db.QueryRowContext(ctx, "SELECT id FROM watches WHERE network=? AND address=? AND id<=? AND start BETWEEN 0 AND ?", n, addr, ceiling, ev.height).Scan(&wid)
@@ -477,19 +530,21 @@ func (s *Service) routeEvent(ctx context.Context, id, ceiling int64, source, n s
 			return e
 		}
 		if e == nil {
+			matched[wid] = true
 			for t := range tokens {
-				if t != "*" {
-					targets[pair{wid, t}] = true
-				}
+				targets[pair{wid, t}] = true
 			}
-			if tokens["*"] {
-				known, e := s.knownTokens(ctx, wid)
-				if e != nil {
-					return e
-				}
-				for _, t := range known {
-					targets[pair{wid, t}] = true
-				}
+			// Another visible effect (including a fee) cannot exclude an
+			// unlogged change to a second, previously held token.
+			known, e := s.knownTokens(ctx, wid)
+			if e != nil {
+				return e
+			}
+			for _, t := range known {
+				targets[pair{wid, t}] = true
+			}
+			if s.ownerInventoryEnabled(n) {
+				inventories[wid] = true
 			}
 			if n == "ton" {
 				found, e := s.jettons(ctx, addr)
@@ -523,7 +578,12 @@ func (s *Service) routeEvent(ctx context.Context, id, ceiling int64, source, n s
 	}
 	obs := "tx/" + ev.hash + "/" + ev.block
 	meta := compact(event)
-	return s.atomic(ctx, func(tx *sql.Tx) error {
+	e = s.atomic(ctx, func(tx *sql.Tx) error {
+		for id := range inventories {
+			if _, err := tx.ExecContext(ctx, "UPDATE watches SET discovery_due=min(discovery_due,?) WHERE id=?", time.Now().Add(time.Second).UnixMilli(), id); err != nil {
+				return err
+			}
+		}
 		for k := range targets {
 			var live bool
 			if e := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM watches WHERE id=?)", k.id).Scan(&live); e != nil {
@@ -542,6 +602,22 @@ func (s *Service) routeEvent(ctx context.Context, id, ceiling int64, source, n s
 				return e
 			}
 		}
+		for wid := range matched {
+			for token := range contracts {
+				if targets[pair{wid, token}] {
+					continue
+				}
+				_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO evm_probes(watch,token,observation,height,source,event)
+                  SELECT id,?,?,?,?,? FROM watches WHERE id=? AND NOT EXISTS(SELECT 1 FROM assets WHERE watch=? AND token=?)`, token, obs, ev.height, source, meta, wid, wid, token)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if ev.traceRetry != nil {
+			return nil
+		}
 		return finishInbox(ctx, tx, id)
 	})
+	return errors.Join(e, ev.traceRetry)
 }

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	pb "github.com/block-vision/sui-go-sdk/pb/sui/rpc/v2"
 )
 
 const splProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -55,15 +53,13 @@ func (s *Service) discoverGap(ctx context.Context, n, a string, lo, hi int64) ([
 			tokens = append(tokens, t)
 		}
 		return tokens, lo + 1, nil
-	case n == "solana":
-		for _, program := range []string{splProgram, token2022} {
-			v, e := s.rpc(ctx, n, "getTokenAccountsByOwner", a, M{"programId": program}, M{"commitment": "finalized", "encoding": "jsonParsed", "minContextSlot": hi})
-			if e != nil || !v.Get("value").IsArray() || v.Get("context.slot").Int() < hi {
-				return nil, lo, invalidEvidence
-			}
-			for _, row := range v.Get("value").Array() {
-				tokens = append(tokens, row.Get("account.data.parsed.info.mint").Str)
-			}
+	case n == "solana" || n == "sui":
+		balances, e := s.ownerBalances(ctx, n, a, hi)
+		if e != nil {
+			return nil, lo, e
+		}
+		for t := range balances {
+			tokens = append(tokens, t)
 		}
 	case n == "ton":
 		t, e := s.jettons(ctx, a)
@@ -71,26 +67,6 @@ func (s *Service) discoverGap(ctx context.Context, n, a string, lo, hi int64) ([
 			return nil, lo, e
 		}
 		tokens = append(tokens, t...)
-	case n == "sui":
-		ctx, c, close, e := s.suiConn(ctx)
-		if e != nil {
-			return nil, lo, e
-		}
-		defer close()
-		req := &pb.ListBalancesRequest{Owner: &a}
-		for {
-			r, e := pb.NewStateServiceClient(c).ListBalances(ctx, req)
-			if e != nil {
-				return nil, lo, e
-			}
-			for _, coin := range r.GetBalances() {
-				tokens = append(tokens, coin.GetCoinType())
-			}
-			if len(r.GetNextPageToken()) == 0 {
-				break
-			}
-			req.PageToken = r.GetNextPageToken()
-		}
 	case n == "aptos":
 		// Replay bounded ledger pages; this also works without an external indexer.
 		v, e := s.rest(ctx, n, fmt.Sprintf("/v1/transactions?start=%d&limit=%d", lo, min(25, hi-lo+1)), nil)
