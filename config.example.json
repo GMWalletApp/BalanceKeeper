@@ -1,0 +1,12 @@
+{
+  "listen": "127.0.0.1:9082",
+  "database": "balancekeeper.db",
+  "token": "${BK_TOKEN}",
+  "scanner": "${CHAINSCANNER_URL}",
+  "scannerToken": "${CHAINSCANNER_CONSUMER_TOKEN}",
+  "broadcastSecret": "${BROADCASTER_NOTIFICATION_SECRET}",
+  "networks": {
+    "base": { "rpc": "${BASE_RPC_URL}", "confirmations": 12 },
+    "ethereum": { "rpc": "${ETHEREUM_RPC_URL}", "confirmations": 12 }
+  }
+}

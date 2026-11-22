@@ -55,7 +55,7 @@ Content-Type: application/json
 
 ## 查询登记状态
 
-`POST /v1/watches/status`。每项仅传网络和地址。成功结果含初始资产数、`subscription`（`pending`、`active` 或 `retrying`）和 `pending_assets`。后者列出正在等待首个成功读数的资产，可带 `last_error`。
+`POST /v1/watches/status`。每项仅传网络和地址。成功结果含初始资产数、`subscription`（`pending`、`active` 或 `retrying`）和 `pending_assets`。后者列出正在等待首个成功读数的资产，可带 `last_error`。上游订阅边界前移后，`discovery_gap` 会显示尚在补查的高度区间（`from_height`、`to_height`，含两端）。
 
 ```http
 POST /v1/watches/status HTTP/1.1
@@ -181,7 +181,7 @@ Content-Type: application/json
 
 <a id="broadcaster"></a>
 
-## 接收 Broadcaster 全局广播事件（v1 设计）
+## 接收 Broadcaster 全局广播事件
 
 `POST /v1/notifications/broadcasts`。这是 Broadcaster 调用的服务间接口。Broadcaster 向同一端点发送所有提交方的广播事件，BalanceKeeper 自行筛选钱包。发送方只需知道接收 URL 和签名密钥。[发送方契约](https://github.com/GMWalletApp/Broadcaster/blob/main/docs/api.zh-CN.md#balancekeeper)
 

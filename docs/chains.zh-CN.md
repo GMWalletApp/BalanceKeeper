@@ -1,6 +1,6 @@
 # ChainScanner 订阅与余额读取
 
-本文定义 BalanceKeeper v1 内部消费者和多链适配器的实现约定。上游协议已按 ChainScanner 提交 `4b598c1` 核对。本页列出计划适配的网络；部署仅接受已配置且通过能力检查的网络和资产类型。[BalanceKeeper HTTP API](api.zh-CN.md) · [上游接口](https://github.com/GMWalletApp/ChainScanner/blob/4b598c1e222ac03805e6c1327a778440ac0d7365/docs/api/zh-CN.md) · [上游网络清单](https://github.com/GMWalletApp/ChainScanner/blob/4b598c1e222ac03805e6c1327a778440ac0d7365/docs/guide/zh-CN.md#networks)
+本文定义 BalanceKeeper v1 内部消费者和多链适配器的实现约定。上游协议已按 ChainScanner 提交 `4b598c1` 核对。服务只接受配置文件已启用的网络。[BalanceKeeper HTTP API](api.zh-CN.md) · [上游接口](https://github.com/GMWalletApp/ChainScanner/blob/4b598c1e222ac03805e6c1327a778440ac0d7365/docs/api/zh-CN.md) · [上游网络清单](https://github.com/GMWalletApp/ChainScanner/blob/4b598c1e222ac03805e6c1327a778440ac0d7365/docs/guide/zh-CN.md#networks)
 
 ## 对接方向
 
@@ -31,7 +31,7 @@ v1 使用 HTTP 长轮询，每个消费者在每个网络运行一个读取循�
 | --- | --- |
 | 领取下一条 | `GET /v1/events/next?network=base&wait=20`。带消费者 Bearer 令牌。200 返回事件，204 表示本轮空闲。客户端读取超时需大于 wait。 |
 | 读取事件 | 外层 `id` 为投递 ID。`activity` 内有 `network`、`height`、`tx_id`、`time_ms`、`confirmations`、`addresses[]` 和链专属 `data`。同一投递可命中多个地址。 |
-| 持久化与确认 | 在一个 SQLite 事务中保存事件和所有命中地址的待刷新任务，再调用 `POST /v1/events/{id}/ack`，空正文，成功为 204。RPC 工作由持久化队列驱动；确认后进程重启仍会继续读取。 |
+| 持久化与确认 | 在 SQLite 事务中保存完整事件和可处理的登记版本范围，再调用 `POST /v1/events/{id}/ack`，空正文，成功为 204。后台从收件箱解析资产并以事务提交工作项。确认后进程重启仍会继续处理。 |
 
 对每个命中的钱包，按链从收付款方、日志、余额变动或写集中提取受影响的资产标识。无论资产是否在初始化列表中，都按规范化的合约、mint 或 coin type 创建余额核验任务。原生转账和手续费也可首次发现原生币。一条交易可同时更新多个钱包和多种资产，各钱包分别核验。
 
@@ -49,16 +49,16 @@ v1 使用 HTTP 长轮询，每个消费者在每个网络运行一个读取循�
 | `tron`，TRX 或 TRC-20 合约 | 在固化节点用 `/walletsolidity/getaccount` 读 TRX，用 `/walletsolidity/triggerconstantcontract` 调 TRC-20 的 `balanceOf(address)`。 | 解析转账、回执日志、内部转账和手续费，统一 Base58Check 与带网络前缀的十六进制表示。[账户接口](https://developers.tron.network/reference/walletsolidity-getaccount) · [只读合约调用](https://developers.tron.network/reference/triggerconstantcontract-1) |
 | `solana`，SOL 或 SPL mint | SOL 用 `getBalance`。SPL 用 `getTokenAccountsByOwner(owner,{mint})` 读取该所有者在该 mint 下的所有账户，累加原始整数金额，采用 finalized commitment，记录返回的 context slot。 | 用 `preTokenBalances`、`postTokenBalances` 的 owner、mint 和账户索引识别变动，覆盖新建与关闭账户。原生币使用交易账户及前后 lamports，包含手续费。[Solana RPC](https://solana.com/docs/rpc/http/gettokenaccountsbyowner) |
 | `sui`，原生 SUI 或完整 coin type | 用 gRPC v2 `StateService/GetBalance(owner,coin_type)` 读取总余额，原生币映射为 `0x2::sui::SUI`。总额包含 coin objects 和地址余额。 | 解析 gRPC 的 `balance_changes` 或 GraphQL 的 `balanceChanges`；按所有者、coin type 匹配，并检查 gas 赞助者。[Sui 余额接口](https://www.docs.sui.io/onchain-finance/asset-custody/address-balances/using-address-balances) |
-| `aptos`，APT、完整 Coin type 或 FA metadata 地址 | 通过全节点 REST `GET /v1/accounts/{address}/balance/{asset_type}` 读取账户标准余额；原生 APT 映射到 `0x1::aptos_coin::AptosCoin`。 | 从交易事件、写集和费用付款方识别 Coin 或 FA；从 store 解析所有者与 metadata，映射不完整时执行地址全刷。[Aptos 余额接口](https://aptos.dev/build/sdks/python-sdk/fetch-data-via-sdk) |
-| `ton`，原生币或 Jetton master | 从账户状态读原生余额。对 master 调 `get_wallet_address(owner)` 派生 Jetton wallet，再调用 wallet 的 `get_wallet_data`，核对 owner 和 master 后读余额。 | 收到未知 Jetton 的通知或相关消息时从候选 wallet 解析 owner 与 master，再向 master 反查派生地址，验证后加入派生 wallet 订阅。保留已知派生 wallet 映射，即使归零也可识别再次入账。对既无 owner 通知又未订阅派生 wallet 的首次入账，需要按 owner 枚举 Jetton wallet 的索引补齐发现。派生失败须可重试，不能视为零余额。[TON Jetton 处理](https://docs.ton.org/applications/payments/jettons) |
+| `aptos`，APT、完整 Coin type 或 FA metadata 地址 | 通过全节点 REST `GET /v1/accounts/{address}/balance/{asset_type}` 读取账户标准余额；原生 APT 映射到 `0x1::aptos_coin::AptosCoin`。 | 从交易事件、写集和费用付款方识别 Coin 或主存储 FA；从 store 解析所有者与 metadata，映射不完整时执行地址全刷。[Aptos 余额接口](https://aptos.dev/build/sdks/python-sdk/fetch-data-via-sdk) |
+| `ton`，原生币或 Jetton master | 从账户状态读原生余额。对 master 调 `get_wallet_address(owner)` 派生 Jetton wallet，再调用 wallet 的 `get_wallet_data`，核对 owner 和 master 后读余额。 | 收到未知 Jetton 的通知或相关消息时从候选 wallet 解析 owner 与 master，再向 master 反查派生地址，验证后加入派生 wallet 订阅。保留已知派生 wallet 映射，即使归零也可识别再次入账。服务也会在登记生效后通过 TON v3 的 owner 索引发现未订阅的 Jetton wallet，此后每个 owner 约五分钟检查一次。派生失败须可重试，不能视为零余额。[TON Jetton 处理](https://docs.ton.org/applications/payments/jettons) |
 
 EVM 适配器共用一套读取逻辑，网络 ID 与 ChainScanner 保持一致：`ethereum`、`arbitrum`、`binance`、`avalanche`、`polygon`、`optimism`、`base`、`hyperevm`、`monad`、`arc`、`plasma`、`robinhood`。启动时核对节点 chain ID。各链原生资产均以 `contract_address:null` 登记；已知与原生资产等价的链上别名应归一或在登记时拒绝重复。
 
 <a id="broadcast-refresh"></a>
 
-## 按广播哈希触发余额刷新（设计）
+## 按广播哈希触发余额刷新
 
-1. **开始核验。** 收件箱按发送来源和 `eventId` 去重；工作队列按本地网络和候选哈希合并 `broadcast.accepted`、`broadcast.included`。入块通知可立即唤醒等待任务。EVM 可通过 ChainScanner 已有的交易查询或本地节点查询交易及回执；Solana 按签名查 finalized 交易。若先收到入块事件，后到的接收事件不能让任务退回 pending。
+1. **开始核验。** 收件箱按发送来源和 `eventId` 去重；入块证据按本地网络和实际交易哈希合并 `broadcast.accepted`、`broadcast.included`。入块通知可立即唤醒等待任务。EVM 可通过 ChainScanner 已有的交易查询或本地节点查询交易及回执；Solana 按签名查 finalized 交易。若先收到入块事件，后到的接收事件不能让任务退回 pending。
 2. **解析真正的交易。** 原生链按适配器读取交易证据。TON 广播标识是规范化的外部消息哈希，须先通过入站消息索引找到实际交易，或使用入块通知中的 `txHash`，并核对消息与交易关联。其他链保留各自的签名、digest 或 txid 编码。发现替换时核验胜出哈希，不能拿新版本的转账参数为旧版本记账。
 3. **筛选和刷新。** 从交易、回执、代币日志和可用的内部调用证据提取地址及候选资产，复用各链的解析规则。匹配范围是本网络的有效登记钱包和派生地址，包含首次收到的新币。证据足以排除全部登记地址时结束；证据不足则继续补查。每次读取余额前确认节点已覆盖实际入块位置，并在落库前核对登记周期。已明确丢弃、过期或被替换且未入块的版本不产生交易快照；长期缺少证据时保留待对账状态，允许后续入块证据恢复处理。
 4. **合并两个来源。** ChainScanner 和 Broadcaster 最终用本地网络、实际链上交易标识、规范块身份、地址登记周期及资产标识关联同一刷新工作。唯一键与快照写入在事务中生效。两个来源同时到达只生成一次成功观测，保存两者的事件关联；对方补充识别的新资产仍要刷新。手动刷新是独立观测。链重组并重新纳入时按新的块身份重新核验。
@@ -68,4 +68,4 @@ EVM 适配器共用一套读取逻辑，网络 ID 与 ChainScanner 保持一致�
 - 每次成功观测保存来源、最小单位金额、精度、刷新时间、可确定的读取位置及该位置对应的区块时间。区块时间无法核实时记为 `null`。金额直接取自本次链上余额查询。事件触发时另外保存对应的交易与事件高度。若适配器只能读最新状态，应先确认所用节点已追到事件位置；无法把返回值精确绑定到某个高度时，快照高度写 `null`。
 - 同一地址资产的初查、事件和主动刷新共用串行执行顺序。节点回退至已知最新位置之前时换节点或重试；缺少精确高度时需使用满足最低进度的节点并串行读取。RPC 在写事务外执行。成功时在同一短事务中检查钱包登记周期、追加余额快照、更新当前指针，并按金额维护当前持仓。正余额加入或保留，零余额移出并保留历史，再将工作项置为完成，防止重投多写或旧结果覆盖新值。
 - RPC 超时、合约调用失败、缺少字段和确定的链上零余额应分别处理。部分失败保留成功项，失败项记录错误，后台任务退避重试。某个资产的节点故障不阻塞其余地址。
-- 地址订阅只覆盖 ChainScanner 能匹配的链上活动。例如在 EVM 上，合约内部给钱包转入 ETH，收款地址只出现在调用树中时，关闭调用追踪会漏掉该地址通知。标准 ERC-20 转账则可通过 `Transfer` 的索引收款地址匹配。漏报期间的余额变动可在下次相关刷新、主动刷新或恢复对账时反映到新快照中。[ChainScanner 的 EVM 地址匹配](https://github.com/GMWalletApp/ChainScanner/blob/c8ca3a7407e33662c6ad62486c9e98960f70cc1c/internal/chains/evm.go#L142-L185)按高度分页回放交易与按时间查询本地余额快照是两种不同的数据需求。
+- 地址订阅只覆盖 ChainScanner 能匹配的链上活动。例如在 EVM 上，合约内部给钱包转入 ETH，收款地址只出现在调用树中时，关闭调用追踪会漏掉该地址通知。标准 ERC-20 转账则可通过 `Transfer` 的索引收款地址匹配。漏报期间的余额变动可在下次相关刷新、主动刷新或恢复对账时反映到新快照中。[ChainScanner 的 EVM 地址匹配](https://github.com/GMWalletApp/ChainScanner/blob/c8ca3a7407e33662c6ad62486c9e98960f70cc1c/internal/chains/evm.go#L142-L185)
