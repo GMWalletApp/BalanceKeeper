@@ -8,6 +8,8 @@ BalanceKeeper 作为消费者调用 ChainScanner 现有的订阅和事件接口�
 
 Broadcaster 的全局通知提供另一条刷新入口：节点接收交易后推送网络与哈希，BalanceKeeper 按哈希核验入块和受影响资产，只刷新本地跟踪的钱包。钱包地址只需登记在 BalanceKeeper。[广播通知与余额刷新](docs/api.zh-CN.md#broadcaster)
 
+服务实现、测试和 SQLite 表结构位于 [src/](src/)，根目录的 `main.go` 是命令行入口。
+
 ## 启动服务
 
 使用 Go 1.26.2 或更高版本。从仓库根目录构建并复制配置。
