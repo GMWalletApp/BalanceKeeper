@@ -52,8 +52,14 @@ func (s *Service) observe(ctx context.Context, id int64, t, source, key string, 
 	}
 	minimum := max(minHeight, start-1, prior.Int64)
 	val, re := s.balance(ctx, n, a, t, minimum)
-	if re == nil && chainIDs[n] != 0 && strings.HasPrefix(key, "tx/") {
-		canonical, err := s.evmBlock(ctx, n, minHeight)
+	if re == nil && (chainIDs[n] != 0 || n == "bitcoin") && strings.HasPrefix(key, "tx/") {
+		var canonical point
+		var err error
+		if n == "bitcoin" {
+			canonical.Block, err = s.bitcoinHashAt(ctx, minHeight)
+		} else {
+			canonical, err = s.evmBlock(ctx, n, minHeight)
+		}
 		if err != nil {
 			re = err
 		} else if !strings.HasSuffix(key, "/"+strings.ToLower(canonical.Block)) {
@@ -290,7 +296,11 @@ func (s *Service) poll(ctx context.Context, n string) error {
 		return invalidEvidence
 	}
 	body := v.Raw
-	identity := fmt.Sprintf("%s/%d/%s/%s/%s", n, id, v.Get("activity.height").Raw, v.Get("activity.tx_id").Str, v.Get("activity.data.transaction.blockHash").Str)
+	block := v.Get("activity.data.transaction.blockHash").Str
+	if n == "bitcoin" {
+		block = v.Get("activity.data.block_hash").Str
+	}
+	identity := fmt.Sprintf("%s/%d/%s/%s/%s", n, id, v.Get("activity.height").Raw, v.Get("activity.tx_id").Str, block)
 	e = s.atomic(ctx, func(tx *sql.Tx) error { return inboxPut(ctx, tx, "chainscanner", identity, n, body) })
 	if e != nil {
 		return e

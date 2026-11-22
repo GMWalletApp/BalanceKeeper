@@ -287,6 +287,9 @@ func (s *Service) evidence(ctx context.Context, n, source string, p gjson.Result
 			}
 		}
 	}
+	if n == "bitcoin" {
+		return s.bitcoinEvidence(ctx, ev, scanner)
+	}
 	if family == "evm" {
 		return s.evmEvidence(ctx, n, ev, scanner)
 	}
@@ -464,6 +467,15 @@ func (s *Service) routeEvent(ctx context.Context, id, ceiling int64, source, n s
 	switch {
 	case chainIDs[n] != 0:
 		c = parseEVM(n, ev, contracts)
+	case n == "bitcoin":
+		changes, err := bitcoinChanges(ev.data)
+		if err != nil {
+			return err
+		}
+		c = candidates{}
+		for addr := range changes {
+			c.add(n, addr, "native")
+		}
 	case n == "solana":
 		c = parseSolana(n, ev.data)
 	default:

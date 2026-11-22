@@ -1,6 +1,6 @@
 # ChainScanner 订阅与余额读取
 
-本文定义 BalanceKeeper v1 内部消费者和多链适配器的实现约定。上游协议已按 ChainScanner 提交 `4b598c1` 核对。服务只接受配置文件已启用的网络。[BalanceKeeper HTTP API](api.zh-CN.md) · [上游接口](https://github.com/GMWalletApp/ChainScanner/blob/4b598c1e222ac03805e6c1327a778440ac0d7365/docs/api/zh-CN.md) · [上游网络清单](https://github.com/GMWalletApp/ChainScanner/blob/4b598c1e222ac03805e6c1327a778440ac0d7365/docs/guide/zh-CN.md#networks)
+本文定义 BalanceKeeper v1 内部消费者和多链适配器的实现约定。服务只接受配置文件已启用的网络。[BalanceKeeper HTTP API](api.zh-CN.md) · [上游接口](https://github.com/GMWalletApp/ChainScanner/blob/main/docs/api/zh-CN.md) · [上游网络清单](https://github.com/GMWalletApp/ChainScanner/blob/main/docs/guide/zh-CN.md#networks)
 
 ## 对接方向
 
@@ -25,7 +25,7 @@ Content-Type: application/json
 
 ## 消费、识别和确认
 
-v1 使用 HTTP 长轮询，每个消费者在每个网络运行一个读取循环。上游还提供 gRPC 与 WebSocket，两者共享订阅和确认状态。[上游事件协议](https://github.com/GMWalletApp/ChainScanner/blob/4b598c1e222ac03805e6c1327a778440ac0d7365/docs/api/zh-CN.md#deliveries)
+v1 使用 HTTP 长轮询，每个消费者在每个网络运行一个读取循环。上游还提供 gRPC 与 WebSocket，两者共享订阅和确认状态。[上游事件协议](https://github.com/GMWalletApp/ChainScanner/blob/main/docs/api/zh-CN.md#deliveries)
 
 | 操作 | 请求与结果 |
 | --- | --- |
@@ -45,6 +45,7 @@ v1 使用 HTTP 长轮询，每个消费者在每个网络运行一个读取循�
 
 | 网络与登记标识 | BalanceKeeper 本地余额 RPC | ChainScanner 事件如何选资产 |
 | --- | --- | --- |
+| `bitcoin`，原生 BTC | 从 Esplora 的 `chain_stats` 读取已确认的收入与支出，以聪记账。配置 `confirmations` 后，分页回退目标高度以上的地址交易。核对快照高度的块哈希及索引链尖。 | 按 txid 重读交易，以输入前序输出和输出锁定脚本匹配钱包。支持 P2PKH、P2SH、P2WPKH、P2WSH 和 P2TR。[节点清单](https://github.com/GMWalletApp/ChainScanner/blob/main/docs/bitcoin-nodes.zh-CN.md) |
 | EVM 原生币或 ERC-20 合约 | 原生币用 `eth_getBalance`，ERC-20 用 `eth_call` 调合约的 `balanceOf(owner)`。同次刷新固定已确认区块并核对区块身份。 | 从钱包参与的 Transfer 日志取得发出合约，核验 ERC-20 转账格式以区分 ERC-721 等日志，并查询该合约余额。原生转账、手续费付款方以及可用 trace 中的内部转账均参与匹配，失败交易也可能消耗 gas。[Ethereum RPC](https://ethereum.org/developers/docs/apis/json-rpc/) |
 | `tron`，TRX 或 TRC-20 合约 | 在固化节点用 `/walletsolidity/getaccount` 读 TRX，用 `/walletsolidity/triggerconstantcontract` 调 TRC-20 的 `balanceOf(address)`。 | 解析转账、回执日志、内部转账和手续费，统一 Base58Check 与带网络前缀的十六进制表示。[账户接口](https://developers.tron.network/reference/walletsolidity-getaccount) · [只读合约调用](https://developers.tron.network/reference/triggerconstantcontract-1) |
 | `solana`，SOL 或 SPL mint | SOL 用 `getBalance`。SPL 用 `getTokenAccountsByOwner(owner,{mint})` 读取该所有者在该 mint 下的所有账户，累加原始整数金额，采用 finalized commitment，记录返回的 context slot。 | 用 `preTokenBalances`、`postTokenBalances` 的 owner、mint 和账户索引识别变动，覆盖新建与关闭账户。原生币使用交易账户及前后 lamports，包含手续费。[Solana RPC](https://solana.com/docs/rpc/http/gettokenaccountsbyowner) |

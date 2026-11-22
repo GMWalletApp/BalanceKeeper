@@ -26,10 +26,10 @@ import (
 var chainIDs = map[string]int64{"ethereum": 1, "arbitrum": 42161, "binance": 56, "avalanche": 43114, "polygon": 137, "optimism": 10, "base": 8453, "hyperevm": 999, "monad": 143, "arc": 5042, "plasma": 9745, "robinhood": 4663}
 
 func supported(n string) bool {
-	return chainIDs[n] != 0 || n == "solana" || n == "sui" || n == "ton" || n == "tron" || n == "aptos"
+	return n == "bitcoin" || chainIDs[n] != 0 || n == "solana" || n == "sui" || n == "ton" || n == "tron" || n == "aptos"
 }
 
-var nativeSymbols = map[string]string{"ethereum": "ETH", "arbitrum": "ETH", "optimism": "ETH", "base": "ETH", "robinhood": "ETH", "hyperevm": "HYPE", "monad": "MON", "arc": "USDC", "binance": "BNB", "polygon": "POL", "avalanche": "AVAX", "plasma": "XPL", "tron": "TRX", "aptos": "APT", "solana": "SOL", "sui": "SUI", "ton": "TON"}
+var nativeSymbols = map[string]string{"bitcoin": "BTC", "ethereum": "ETH", "arbitrum": "ETH", "optimism": "ETH", "base": "ETH", "robinhood": "ETH", "hyperevm": "HYPE", "monad": "MON", "arc": "USDC", "binance": "BNB", "polygon": "POL", "avalanche": "AVAX", "plasma": "XPL", "tron": "TRX", "aptos": "APT", "solana": "SOL", "sui": "SUI", "ton": "TON"}
 
 func abiSymbol(raw string) string {
 	if len(raw) > 2048 {
@@ -77,6 +77,8 @@ func canonical(n, a string) (string, error) {
 	}
 	h := strings.TrimPrefix(a, "0x")
 	switch {
+	case n == "bitcoin":
+		return bitcoinAddress(a)
 	case chainIDs[n] != 0:
 		if b, e := hex.DecodeString(h); e == nil && len(b) == 20 {
 			return "0x" + strings.ToLower(h), nil
@@ -163,6 +165,9 @@ func moveType(input string, depth int) (value, rest string, ok bool) {
 func tokenID(n, t string) (string, error) {
 	if t == "native" {
 		return t, nil
+	}
+	if n == "bitcoin" {
+		return "", errors.New("bitcoin requires native")
 	}
 	if (n == "aptos" || n == "sui") && strings.Contains(t, "::") {
 		typ, rest, valid := moveType(t, 0)
@@ -301,6 +306,8 @@ func (s *Service) head(ctx context.Context, n string) (point, error) {
 		}
 		r, e = s.rest(ctx, n, "/walletsolidity/getnowblock", M{})
 		r = r.Get("block_header.raw_data.number")
+	case n == "bitcoin":
+		return s.bitcoinHead(ctx)
 	case n == "sui":
 		return s.suiHead(ctx)
 	case n == "ton":
@@ -443,6 +450,8 @@ func (s *Service) balance(ctx context.Context, n, a, t string, minHeight int64) 
 		return reading{Amount: x.String(), Decimals: dec, Height: &h.Height}, nil
 	case n == "sui":
 		return s.suiBalance(ctx, a, t)
+	case n == "bitcoin":
+		return s.bitcoinBalance(ctx, a, t, h)
 	case n == "ton":
 		return s.tonBalance(ctx, a, t)
 	}
