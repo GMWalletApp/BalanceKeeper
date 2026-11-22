@@ -13,7 +13,7 @@
 | 查询快照历史 | `POST /v1/snapshots/query` | 可选 `tokens`、`limit`、`before` |
 | 删除地址及其数据 | `POST /v1/watches/delete` | 无，按网络和地址整组删除 |
 
-每个接口都接收非空 JSON 数组。每项必填一个具体的 `network` 和一个 `address`，包括只操作一项的请求。监听同一个 EVM 地址的多条链，要逐链填写数组项。路径和查询字符串都不携带业务参数。请求头使用 `Authorization: Bearer <BK_TOKEN>` 和 `Content-Type: application/json`。
+上表六个业务接口都接收非空 JSON 数组。每项必填一个具体的 `network` 和一个 `address`，包括只操作一项的请求。监听同一个 EVM 地址的多条链，要逐链填写数组项。路径和查询字符串都不携带业务参数。请求头使用 `Authorization: Bearer <BK_TOKEN>` 和 `Content-Type: application/json`。
 
 余额、刷新和历史接口共用同一种选择方式：
 
@@ -149,7 +149,7 @@ Content-Type: application/json
 ]}
 ```
 
-每条快照记录当时的资产名称、原始金额、精度（未知为 `null`）、观测时间、RPC 读取高度（无法精确取得时为 `null`）和来源。`source` 可为 `initial`、`manual`、`chainscanner`、`reconcile`。事件触发的快照在 `event` 中保存 `delivery_id`、`tx_id` 和事件高度，其余为 `null`。RPC 读取高度可晚于事件高度。
+每条快照记录当时的资产名称、原始金额、精度（未知为 `null`）、观测时间、RPC 读取高度（无法精确取得时为 `null`）和来源。`source` 可为 `initial`、`manual`、`chainscanner`、`broadcaster`、`reconcile`。事件触发的快照在 `event` 中保存 `tx_id` 和事件高度。ChainScanner 来源另存 `delivery_id`，Broadcaster 来源另存 `event_id` 和 `broadcast_hash`。非事件触发时 `event` 为 `null`。RPC 读取高度可晚于事件高度。
 
 ## 删除地址及其全部记录
 
@@ -174,6 +174,49 @@ Content-Type: application/json
 ```
 
 本地提交后异步退订。迟到投递或在途刷新不能恢复被删除周期的数据。重新登记会建立新的登记周期，历史从空开始。
+
+<a id="broadcaster"></a>
+
+## 接收 Broadcaster 全局广播事件（v1 设计）
+
+`POST /v1/notifications/broadcasts`。这是 Broadcaster 调用的服务间接口。Broadcaster 向同一端点发送所有提交方的广播事件，BalanceKeeper 自行筛选钱包。发送方只需知道接收 URL 和签名密钥。[发送方契约](https://github.com/GMWalletApp/Broadcaster/blob/main/docs/api.zh-CN.md#balancekeeper)
+
+请求体为非空 JSON 数组，可混合网络。每项必填 `schemaVersion`（整数 1）、`eventId`（稳定字符串）、`event`、`family`、`network`、`hash`。`broadcast.accepted` 表示节点首次确认接收该签名版本或已认识它。`broadcast.included` 表示 Broadcaster 已观察到入块，还须携带 `txHash`。后者单独到达时也应启动核验。正文仅传路由字段和哈希，钱包地址由接收方查交易取得。
+
+```json
+[
+  {
+    "schemaVersion": 1,
+    "eventId": "8af9bce60622455c8710516cde6d9981",
+    "event": "broadcast.accepted",
+    "family": "evm",
+    "network": "8453",
+    "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "schemaVersion": 1,
+    "eventId": "51a0053ad0c34a84834dbee02ab77d69",
+    "event": "broadcast.included",
+    "family": "evm",
+    "network": "8453",
+    "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "txHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+]
+```
+
+| 接收结果 | 响应及行为 |
+| --- | --- |
+| 整批验签、校验并持久化完成 | `204` 空正文。同一来源的相同事件 ID 重投只复用已有记录。 |
+| 签名无效或缺失 | `401`。用接收端独立密钥验证 `X-Broadcaster-Signature`，对原始正文计算 HMAC-SHA256，按小写十六进制常量时间比较。此端点使用 Webhook 签名鉴权。 |
+| 空批、非法字段、未知版本/事件类型或同一 ID 内容冲突 | `400`，整批不提交。有问题的条目用 `error.index` 返回零起始下标。 |
+| 暂时限流或无法持久化 | `429` 或 `503`，可附 `Retry-After`。发送方可重投整批。 |
+
+**网络和资产筛选。** 先把发送方的 `(family, network)` 映射成本地具体网络，例如 `(evm, "8453") → base`、`(evm, "1") → ethereum`。Solana 的自定义 cluster 名须显式映射到已验证的同一网络。Bitcoin 等本部署未启用的网络记录为已忽略并确认，不能阻塞批内其他网络。没有登记钱包的网络可直接跳过。
+
+收到受支持网络的事件后，通过交易哈希核验链上位置，解析发送方、实际收款方、日志、代付手续费账户和受影响资产，再与本地登记地址（含派生地址）匹配。例如 Base 上转入 USDC 时，交易的 `to` 可以是 USDC 合约；应从回执 Transfer 日志取出真正的钱包。命中后，即使该钱包之前没有 USDC，也将它交给本地余额读取和资产发现流程。[余额刷新与去重](chains.zh-CN.md#broadcast-refresh)
+
+**确认时机。** 返回 204 只表示收件箱已提交。后台随即查哈希；pending、回执缺失、RPC 滞后时保留任务并退避。确认入块、满足本链确认策略且余额节点已追上后，才写余额快照。执行回退的交易仍需核验实际支付的手续费。
 
 ## 请求级错误
 

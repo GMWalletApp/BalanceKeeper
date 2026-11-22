@@ -6,6 +6,8 @@ BalanceKeeper 为钱包和支付服务维护指定地址的资产余额。调用
 
 BalanceKeeper 作为消费者调用 ChainScanner 现有的订阅和事件接口。部署时给 BalanceKeeper 配置 ChainScanner 地址和消费者令牌即可复用监听服务。各链的资产识别、余额查询和快照写入均由 BalanceKeeper 实现。
 
+Broadcaster 的全局通知提供另一条刷新入口：节点接收交易后推送网络与哈希，BalanceKeeper 按哈希核验入块和受影响资产，只刷新本地跟踪的钱包。钱包地址只需登记在 BalanceKeeper。[广播通知与余额刷新设计](docs/api.zh-CN.md#broadcaster)
+
 ## 一次登记多个网络和地址
 
 调用 `POST /v1/watches`，JSON 数组中每项必填 `network`、`address` 和该链的初始 `assets`。只登记一个地址时传一项。下面的一次请求在 Base 和 Ethereum 上登记同一地址，同时在 Base 上登记另一个地址。
